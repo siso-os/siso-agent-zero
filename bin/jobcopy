@@ -4,5 +4,6 @@
 # issues than it's worth ... Is this something we can delete?"). Run the job with: codex-run --as Builder -C <printed path> jobs/JOB.md
 set -eu
 W="$HOME/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base"; j="${1:?job}"; b="${2:-job/$j}"
-git -C "$W/pair-ab" fetch -q origin && git -C "$W/pair-ab" worktree add -q "$W/$j" -b "$b" origin/dev
+R="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base"  # the repo itself (5 Oct: pair-ab is gone); its working tree is never touched
+git -C "$R" fetch -q origin && git -C "$R" worktree add -q "$W/$j" -b "$b" origin/dev
 (cd "$W/$j" && heavy -- pnpm install --frozen-lockfile --prefer-offline > /dev/null) && echo "$W/$j"

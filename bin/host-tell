@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# host-tell <pane w7:pNN | NAME> "<text>": send one message into a hosted chat through its Agent Base host socket, the same
+# path his typed messages use (t:'prompt', delivery 'auto'): an idle chat starts at once, a working one gets it inside its
+# current turn (Shaan, 8 Oct ~20:55: "when you message them I want them to see it instantly they're smart boys they can handle
+# that"; it was 'next', which held it until the turn ended). DELIVERY=next keeps the old wait. For chats with no herdr pane,
+# such as Codex souls (name-<NAME>.json host records). One line or a pointer to a file; agents don't ping each other, this is Agent Zero's handover (ADR 0004).
+set -euo pipefail
+who=${1:?usage: host-tell <pane|NAME> "<text>"}; text=${2:?text}
+H="$HOME/.local/state/agent-base/hosts"
+rec="$H/${who/:/_}.json"; [ -f "$rec" ] || rec="$H/name-$who.json"
+# By name: the newest record with that name, laptop panes (w7_*.json) or Mac mini owners (remote-mini-*.json, reached through
+# their tunnelled port). Newest, because a dead pane can leave a stale record under the same name. `|| true`: no match is the
+# "no host record" line below, not a silent pipefail exit.
+[ -f "$rec" ] || rec=$(grep -l "\"name\": *\"$who\"" "$H"/w7_*.json "$H"/remote-*.json 2>/dev/null | xargs ls -t 2>/dev/null | head -1 || true)
+[ -n "$rec" ] && [ -f "$rec" ] || { echo "no host record for $who"; exit 1; }
+cd "$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host"
+REC="$rec" TEXT="$text" node --input-type=module -e '
+import WebSocket from "ws"; import fs from "fs"; import crypto from "crypto";
+const h = JSON.parse(fs.readFileSync(process.env.REC)); const id = "a0-" + crypto.randomUUID();
+const ws = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${h.token}`);
+const done = (m, c) => { console.log(`${h.name}: ${m}`); ws.close(); process.exit(c); };
+ws.on("open", () => ws.send(JSON.stringify({ t: "prompt", key: id, messageId: id, text: process.env.TEXT, images: [], delivery: process.env.DELIVERY || "auto", from: "app" })));
+ws.on("message", b => { const s = String(b); if (s.includes(id)) { const m = JSON.parse(s); if (/error|reject|unavailable/.test(s) && !/queued|accepted|delivered/.test(s)) done("refused: " + s.slice(0, 200), 2); done("queued (" + (m.t || "ack") + ")", 0); } });
+ws.on("error", e => done("socket error: " + e.message, 1));
+setTimeout(() => done("sent; no ack within 8 s (check the chat)", 0), 8000);'

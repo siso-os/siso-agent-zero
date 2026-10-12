@@ -6,13 +6,17 @@
 #   role                 each role: its last run, its number before -> after, what it did
 #   role start <name>    start its chat (once; launchd keeps it alive and resumes it): Sol 6.1, effort high, in its home repo
 #   role run <name>      one run now (background it); appends to the ledger from the RETURN's NUMBER line
-#   role own <name> [N]  the owner: up to N runs back to back (default 4), stopping early when two runs in a row change nothing
+#   role own <name> [N]  up to N runs (default 4); stop on blocked or two consecutive runs that change nothing
 set -eu
 Z="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = own ]; then
   n="${2:?role}"; max="${3:-4}"; still=0; i=0
-  while [ $i -lt "$max" ] && [ $still -lt 2 ]; do i=$((i+1)); before=$(tail -1 "$Z/roles/$n.jsonl" 2>/dev/null | python3 -c "import json,sys;print(json.loads(sys.stdin.read() or '{}').get('changed'))" 2>/dev/null)
-    "$0" run "$n" >/dev/null; last=$(tail -1 "$Z/roles/$n.jsonl"); echo "$last" | grep -q '"changed": null\|nothing\|no processes stopped' && still=$((still+1)) || still=0; done
+  while [ $i -lt "$max" ] && [ $still -lt 2 ]; do
+    i=$((i+1))
+    "$0" run "$n" >/dev/null; last=$(tail -1 "$Z/roles/$n.jsonl")
+    printf '%s\n' "$last" | python3 -c 'import json,re,sys; sys.exit(0 if re.match(r"blocked\b", str(json.load(sys.stdin).get("status", "")).strip(), re.I) else 1)' && break
+    echo "$last" | grep -q '"changed": null\|nothing\|no processes stopped' && still=$((still+1)) || still=0
+  done
   echo "$n: $i runs"; exit 0; fi
 AB="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host-service"
 CHAT() { printf %s "$1" | tr '[:lower:]' '[:upper:]'; }
@@ -24,10 +28,16 @@ if [ "${1:-}" != run ]; then
   for f in "$Z"/roles/*.md; do n=$(basename "$f" .md); l=$(tail -1 "$Z/roles/$n.jsonl" 2>/dev/null || true)
     printf '%-10s %s\n' "$n" "${l:-never run}" | cut -c1-220; done; exit 0; fi
 n="${2:?role name}"; f="$Z/roles/$n.md"; [ -f "$f" ] || { echo "no role $n"; exit 2; }
-b=$(mktemp); { echo "TASK: role-$n ($(date '+%-d %b %Y %H:%M'))"; echo; cat "$f"; echo; echo "## Your last runs (ledger)"; tail -5 "$Z/roles/$n.jsonl" 2>/dev/null || echo "none yet";
+# Renewable spend (Shaan, 8 Oct ~20:45: "make it so they don't fill up as fast ... we actually keep the work that we gain"):
+# the whole role file goes in only when it changed since the last turn; otherwise a short continue line points at it.
+sent="$HOME/.local/state/a0/role-sent-$n"; sum=$(shasum "$f" | cut -c1-40)
+b=$(mktemp); { echo "TASK: role-$n ($(date '+%-d %b %Y %H:%M'))"; echo
+  if [ "$(cat "$sent" 2>/dev/null)" = "$sum" ]; then echo "Your role ($f) is unchanged since your last turn and still binds. Continue your goal from your PLAN and HANDOFF; re-read nothing you already hold."
+  else cat "$f"; fi; echo; echo "## Your last runs (ledger)"; tail -3 "$Z/roles/$n.jsonl" 2>/dev/null || echo "none yet";
   echo; echo "Do real work this run: measure your number first, do the work, measure again. Keep a list of what you changed (paths, commands)."
+  echo "Budget: finish this turn within 45 minutes; whatever is left goes in your PLAN for the next turn (Shaan, 8 Oct: agents that run for hours and hang)."
   echo "End your reply with three lines exactly: STATUS: done|blocked — <one line>; NUMBER: <name of number> <before> -> <after>; CHANGED: <what, paths>"; } > "$b"
-out="$Z/roles/.last-$n.out"; rc=0; "$AB" send --name "$(CHAT "$n")" --prompt-file "$b" --timeout 5400 > "$out" 2>&1 || rc=$?
+echo "$sum" > "$sent"; out="$Z/roles/.last-$n.out"; rc=0; "$AB" send --name "$(CHAT "$n")" --prompt-file "$b" --timeout 3600 > "$out" 2>&1 || rc=$?
 [ $rc = 2 ] && echo "STATUS: blocked — its chat is not running (role start $n)" >> "$out"
 [ $rc = 3 ] && echo "STATUS: still working after 90 min (see its chat)" >> "$out"
 python3 - "$Z/roles/$n.jsonl" "$out" <<'PY'

@@ -18,6 +18,24 @@ Rebuilt from first principles on 3-4 Oct 2026 (Shaan: "make our own agent zero .
 ... the fresh new version ... the way elon would do it. It's our highest leverage agent"). Why it works this way:
 `PRINCIPLES.md`. The evidence behind every rule: `docs/evidence/2026-10-03-first-principles/`.
 
+## Now (6 Oct 2026, night): read the ADRs first
+How Agent Zero decides is in `docs/adr/` (one decision per file, his words inside). They win over older text in this file.
+- **0001: reason from the budget, no hard caps.** Check the plan window, who is burning it and the laptop before any fan-out.
+- **0002: one Opus owner per surface.** Shaan talks to them directly; Agent Zero keeps the data (registry, owner cards,
+  Today pad, tasks, release notes), watches context (owners autocompact at 30%) and cold-reads anything bound for production.
+  Codex is out until 12 Oct 23:05, so the Codex lanes, roles and fleets below wait until then.
+- **0003: how Agent Zero writes to Shaan.** Standard Claude markdown with links; the first line is what to do or look at;
+  no X-of-Y or status-row scaffolding.
+- **0004: every ask goes to one place.** `bin/ask new` files his words as a task + spec; owners pull `bin/ask queue <NAME>`, batch
+  by area, newer words win on overlap.
+- **0005: no approvals.** Owners decide from first principles, ship, and bring him a URL with before/after shots. Only physical
+  things wait for him (his identity, a person on camera, money beyond budget, speaking as him), booked as sittings.
+- **0008: one owner, the blocker first, use what we hold, no timers.** Agent Zero hands a product over once, then sends nothing.
+- **0009: standing authorization; never hand him a command.** Main (by PR), prod, live streams on his accounts, logins we hold
+  and spend in budget go ahead and get reported. Only his phone code, face or card waits. A blocked agent takes a recoverable route.
+How, as tested commands: `docs/RUNBOOK.md`. First command after a compaction: `bin/owners`.
+The current owners, their panes and briefs: the top entry of `.agents/HANDOFF.md`. The home he sees: `_data/a0-home/A0-HOME-SPEC.md`.
+
 ## The job
 His words become working, live outcomes, fast, and he spends no minutes operating the machine. Measure both: minutes from his
 words to live; his minutes spent restarting, relaying, testing or debugging agents. His words outrank everything in this repo.
@@ -76,6 +94,7 @@ Shaan, 4 Oct: infrastructure agents that make "real progress on the estate, not 
 - **Finish, don't hand back.** If the next action is known and safe, do it; a report records what is done.
 
 ## Talking to him
+**ADR 0003 wins** for replies in Agent Base (plain Claude markdown, links, no scaffolding). The text below is older.
 Skills `adhd-agent-output` and `shaan-report`: first line is his next action, state as X of Y, his words quoted, a URL, never a
 yes/no question (decide from first principles and say what you decided). Never "captain" or nautical talk.
 
@@ -90,6 +109,7 @@ yes/no question (decide from first principles and say what you decided). Never "
 | One map per app (screens, routes, loops, data) | `docs/maps/` (Agent Base: `agent-base.md`) |
 | Jobs (one file per job: brief, status, result) | `jobs/` |
 | Research topics (persist; fleets are temporary) | `research/<topic>/FINDINGS.md` |
+| Decisions (ADRs): how Agent Zero decides | `docs/adr/` |
 | Checkpoint for the next session | `.agents/HANDOFF.md` (only the current entry; history in `HANDOFF-HISTORY.md`) |
 | The house: which room holds what | `docs/HOUSE.md` |
 | His words, verbatim (outrank everything) | `words/`, and every chat message in `.agents/a0/transcript/` (`bin/a0-transcript build`) |
@@ -133,6 +153,6 @@ Laptop (here), VPS (always on), Mac mini (optional capacity until it holds 7 day
 Read this file and `.agents/HANDOFF.md`, then run `look`. `recall <words>` before asking anyone anything; Serena for code. Load nothing else until the work needs it.
 
 ## Not here any more
-The upstream firstmate supervisor (crewmates, captain, wake queues), the seven standing domain owners, inboxes, `a0-tell`,
-`notice`, `pair` and the old boot packet live in history only: `../siso-firstmate` (until retired) and
+The upstream firstmate supervisor (crewmates, captain, wake queues), the seven standing domain owners, inboxes,
+`notice`, `pair` and the old boot packet live in history only (`a0-tell` is back, for one-line handovers to owners: ADR 0002): `../siso-firstmate` (until retired) and
 `_archive/2026-10-03-agent-zero-fresh/`. `extensions/` holds the voice extension that launchd `com.siso.voice-sync` still runs.

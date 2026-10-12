@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""heard: every message typed into every hosted Claude agent in the last N hours, on the laptop and the Mac mini, in time order:
+what Shaan said to each owner, what Agent Zero sent them, and what agents sent each other (peer messages).
+Shaan, 8 Oct ~22:58: "as long as you're looped in with one command you can see every word I've said to all of these agents in the
+last like six hours or so then it's good ... every prompt I've sent to these guys you should be able to see that ... and maybe both
+the agents have sent to each other".
+  heard                 the last 6 hours, everyone but Agent Zero's own chat (its words are already in its context)
+  heard --hours 2       a shorter window
+  heard --who LANDING   only agents whose name contains LANDING
+  heard --shaan         only his words (drops Agent Zero's and agents' messages)
+  heard --with-a0       include Agent Zero's own conversation
+Reads conversations only (both logins: ~/.claude-siso and ~/.config/claude-siso-3; the mini over ssh). Prints, never stores:
+his words stay out of git and logs. Sub-agent chats and tool output are skipped. Names come from the host records' sessions."""
+import glob, json, os, subprocess, sys, time
+from datetime import datetime
+
+A = sys.argv[1:]
+arg = lambda k, d=None: A[A.index(k) + 1] if k in A else d
+HOURS = float(arg("--hours", 6))
+SINCE = time.time() - HOURS * 3600
+LOGINS = ["~/.claude-siso", "~/.config/claude-siso-3"]
+
+
+def collect():
+    """This machine's messages as dicts (also what the mini runs, with --collect)."""
+    names = {}
+    for f in glob.glob(os.path.expanduser("~/.local/state/agent-base/hosts/*.json")):
+        try:
+            d = json.load(open(f))
+            if d.get("session") and d.get("name"):
+                names[d["session"]] = d["name"]
+        except Exception:
+            pass
+    out = []
+    for login in LOGINS:
+        for f in glob.glob(os.path.expanduser(f"{login}/projects/*/*.jsonl")):
+            if os.path.getmtime(f) < SINCE:
+                continue
+            sid = os.path.basename(f)[:-6]
+            for line in open(f, errors="replace"):
+                if '"type":"user"' not in line or '"tool_result"' in line[:4000] and '"promptSource"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") != "user" or d.get("isSidechain") or d.get("isMeta"):
+                    continue
+                src, origin = d.get("promptSource"), d.get("turnOrigin")
+                if not (src == "sdk" or origin == "peer"):
+                    continue
+                c = d.get("message", {}).get("content")
+                t = c if isinstance(c, str) else " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+                imgs = 0 if isinstance(c, str) else sum(1 for x in c if isinstance(x, dict) and x.get("type") == "image")
+                t = (t or "").strip()
+                if not t and not imgs:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    continue
+                if ts < SINCE:
+                    continue
+                who = "peer" if origin == "peer" else ("A0" if t.startswith("Agent Zero") else
+                                                       "start" if " and start: you are " in t[:400] else
+                                                       "resume" if t.startswith("Compacted.") else "Shaan")
+                out.append({"ts": ts, "sid": sid, "agent": names.get(sid), "cwd": d.get("cwd", ""), "who": who,
+                            "text": t, "imgs": imgs, "login": login.split("/")[-1]})
+    return out
+
+
+if "--collect" in A:
+    print(json.dumps(collect())); sys.exit(0)
+
+rows = collect()
+for r in rows:
+    r["machine"] = "laptop"
+try:  # the Mac mini: the same script over ssh
+    src = open(os.path.abspath(__file__)).read()
+    p = subprocess.run(["ssh", "-o", "ConnectTimeout=5", "mini-fast", "python3", "-", "--collect", "--hours", str(HOURS)],
+                       input=src, capture_output=True, text=True, timeout=60)
+    for r in json.loads(p.stdout or "[]"):
+        r["machine"] = "mini"; rows.append(r)
+except Exception as e:
+    print(f"(Mac mini not read: {e})")
+
+# Names for chats with no host record left: the laptop's records of mini hosts, then the folder.
+names = {}
+for f in glob.glob(os.path.expanduser("~/.local/state/agent-base/hosts/*.json")):
+    try:
+        d = json.load(open(f)); names[d.get("session")] = d.get("name")
+    except Exception:
+        pass
+for r in rows:
+    r["agent"] = r["agent"] or names.get(r["sid"]) or "?" + os.path.basename(r["cwd"] or "")[:18]
+if "--with-a0" not in A:
+    rows = [r for r in rows if r["agent"] != "A0"]
+if arg("--who"):
+    rows = [r for r in rows if arg("--who").upper() in r["agent"].upper()]
+if "--shaan" in A:
+    rows = [r for r in rows if r["who"] == "Shaan"]
+rows.sort(key=lambda r: r["ts"])
+for r in rows:
+    t = r["text"] if r["who"] == "Shaan" else r["text"][:300] + ("…" if len(r["text"]) > 300 else "")
+    img = f" [+{r['imgs']} image{'s' if r['imgs'] > 1 else ''}]" if r["imgs"] else ""
+    mark = " (mini)" if r["machine"] == "mini" else ""
+    print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {r['agent']}{mark} <- {r['who']}: {t}{img}\n")
+by = {}
+for r in rows:
+    if r["who"] == "Shaan":
+        by[r["agent"]] = by.get(r["agent"], 0) + 1
+print(f"{len(rows)} messages in {HOURS:g} h; his, by agent: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda x: -x[1])))

@@ -2,10 +2,26 @@
 # opus-chat NAME DIR BRIEF: one Opus chat Shaan talks to directly (a working partner for taste work), run inside Agent Base's host so
 # it shows in the app, in a new herdr tab of workspace A0. Shaan, 4 Oct ~05:20: "talk to one opus and have the opus deal with it ...
 # figure out with the opus. And then we just hand roll it". Not a sub-agent: its own chat, its own folder, a brief file to start from.
+# Auto-compacts at 35% of the window (Shaan, 6 Oct ~22:50: long chats were "rinsing" the Claude plan; "they should be
+# slash compacting around 30%"); 35% from 8 Oct ~19:50 ("I think 35% will be better that last 5% goes a long way").
+# A0_COMPACT_PCT overrides it.
+# --on MACHINE (or A0_ON=MACHINE): run it on the Mac mini (or siso-vps) instead; the laptop only shows it (FLEET-COST, 7 Oct: swap
+# 8.1 of 9.2 GB with 11 hosted chats here, the mini 16 GB and nearly idle). Agent Base's ab-remote copies the brief there, starts
+# the host in tmux (ssh -t mini-fast tmux attach -t ab-owners) and mirrors it into the app here; no herdr tab. It refuses, and
+# says why, when that machine has no Claude login or no copy of DIR.
 set -eu
+on="${A0_ON:-}"
+if [ "${1:-}" = "--on" ]; then on="${2:?machine}"; shift 2; fi
 name="${1:?name}"; dir="${2:?folder}"; brief="${3:?brief file}"
+if [ -n "$on" ]; then
+  exec "$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/ab-remote" start --on "$on" \
+    --name "$name" --cwd "$dir" --brief "$brief" --model 'claude-opus-5-5[1m]' --compact "${A0_COMPACT_PCT:-40}" \
+    --config-dir "${A0_CONFIG_DIR:-\$HOME/.claude-siso}"  # fuzeheritage there too, unless A0_CONFIG_DIR says otherwise (ab-remote's default is lordsisodia's)
+fi
 ws=$(herdr workspace list | python3 -c "import json,sys;print(next((w['workspace_id'] for w in json.load(sys.stdin)['result']['workspaces'] if w.get('label')=='A0'),''))")
 pane=$(herdr tab create --workspace "$ws" --cwd "$dir" --label "$name" | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 host="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
-herdr pane run "$pane" "CLAUDE_CONFIG_DIR=\$HOME/.config/claude-siso-3 $host --keep-herdr-env --permission-mode bypassPermissions --name '$name' --model 'claude-opus-5-5[1m]' --prompt 'Read $brief and start: you are $name.'"
+# A0_CONFIG_DIR picks the Claude login, default fuzeheritage's ~/.claude-siso (Shaan, 8 Oct ~08:45: "same with any other agents that
+# you spawn up, very important"); lordsisodia's ~/.config/claude-siso-3 is the reserve.
+herdr pane run "$pane" "CLAUDE_CONFIG_DIR=${A0_CONFIG_DIR:-\$HOME/.claude-siso} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=\${A0_COMPACT_PCT:-40} $host --keep-herdr-env --permission-mode bypassPermissions --name '$name' --model 'claude-opus-5-5[1m]' --prompt 'Read $brief and start: you are $name.'"
 echo "$name starting in pane $pane ($dir)"

@@ -283,7 +283,7 @@ def cmd_set(args):
     task = read_task(args.id)
     allowed = {"owner", "agent", "model", "priority", "project", "links.spec",
                "links.plan_item", "links.pr", "links.url", "links.source", "links.brief",
-               "next", "parent"}
+               "next", "parent", "touches", "supersedes"}
     for assignment in args.fields:
         if "=" not in assignment:
             raise ValueError(f"expected field=value: {assignment}")
@@ -292,6 +292,9 @@ def cmd_set(args):
             raise ValueError(f"field cannot be set: {field}")
         if field == "priority" and value not in PRIORITIES:
             raise ValueError(f"invalid priority: {value}")
+        if field in ("touches", "supersedes"):
+            task[field] = [x.strip() for x in value.split(",") if x.strip()]
+            continue
         if field.startswith("links."):
             task["links"][field.split(".", 1)[1]] = value or None
         else:

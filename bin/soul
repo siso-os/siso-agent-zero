@@ -1,7 +1,7 @@
 #!/bin/sh
 # soul: one of Agent Zero's own agents: a hosted Codex chat (Sol 6.1) filed under Agent Zero in the app, which he can open and
 # message. It gets BRIEF as its first turn; its final reply lands in OUT; a line goes to ~/.local/state/a0/souls/done.log.
-#   soul NAME BRIEF OUT [effort]      start it (returns at once)
+#   soul NAME BRIEF OUT [effort]      start it (returns at once); SOUL_MODEL=gpt-6-astra for an Astra (default Sol 6.1)
 #   soul wait [NAME...]               until those (default: all started) have returned; prints their done lines
 #   soul stop NAME                    stop its chat and file it away (its Codex thread id is kept in souls/threads.txt)
 set -eu
@@ -24,7 +24,11 @@ n=${1:?name}; brief=${2:?brief}; out=${3:?out}; effort=${4:-medium}
 grep -q -- '"--lead"' "$AB/src/codex-host.ts" || { echo "soul: the live host has no --lead yet; refusing (it would land in the side nav)"; exit 3; }
 mkdir -p "$(dirname "$out")"
 # Every soul starts as an owner (Shaan, 5 Oct: "not a dumb fucking agent but like an owner"): souls/OWNER.md goes before its brief.
-first="$S/$n.first.md"; cat "$(dirname "$0")/../souls/OWNER.md" "$brief" > "$first"; brief="$first"
+first="$S/$n.first.md"; cat "$(dirname "$0")/../souls/OWNER.md" "$brief" "$(dirname "$0")/../souls/STATUS.md" > "$first"; brief="$first"
+# Its status card exists from the first second (souls/STATUS.md); the soul keeps it current, Agent Base draws it.
+mkdir -p "$HOME/.local/state/a0/owners"; [ -f "$HOME/.local/state/a0/owners/$n.json" ] || python3 -c 'import json,sys,datetime
+n,w,b=sys.argv[1:4]; t=datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+json.dump(dict(name=n, workspace=w or None, title=n, subtitle="starting", status="researching", started=t, updated=t, page=None, summary="", findings=[], subagents=[], next="", asks=[], brief=b), open(sys.argv[4],"w"), indent=1)' "$n" "$workspace" "$2" "$HOME/.local/state/a0/owners/$n.json"
 python3 - "$n" "$workspace" "$parent" "$brief" "$out" <<'PYLEDGER'
 import datetime, fcntl, json, os, socket, sys
 from pathlib import Path
@@ -36,7 +40,7 @@ with p.open('a') as f:
                            parent=sys.argv[3], machine='mini' if 'mini' in socket.gethostname().lower() else 'laptop', brief=sys.argv[4], out=sys.argv[5])) + '\n')
     f.flush(); os.fsync(f.fileno())
 PYLEDGER
-( cd "$HOME" && HERDR_ENV=0 nohup node --experimental-strip-types --no-warnings "$AB/src/service-runner.ts" --harness codex --name "$n" --model gpt-6.1-sol --effort "$effort" --lead "$parent" > "$S/$n.host.log" 2>&1 & )
+( cd "$HOME" && HERDR_ENV=0 nohup node --experimental-strip-types --no-warnings "$AB/src/service-runner.ts" --harness codex --name "$n" --model "${SOUL_MODEL:-gpt-6.1-sol}" --effort "$effort" --lead "$parent" > "$S/$n.host.log" 2>&1 & )
 touch "$S/$n.running"
 ( sleep 20; rc=0; "$AB/bin/siso-host-service" send --name "$n" --prompt-file "$brief" --timeout 10800 > "$out" 2> "$S/$n.err" || rc=$?
   echo "$(date +%H:%M) $n rc=$rc $out" >> "$S/done.log"; rm -f "$S/$n.running" ) >/dev/null 2>&1 &

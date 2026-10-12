@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# a0-switch-login CONFIG_DIR [--after SECONDS] [--pid HOST_PID]: move Agent Zero to another Claude login and resume the same conversation there.
+# Shaan, 8 Oct ~05:30: "how can we move this agent 0 over to the other plan and still have it read all the conversation".
+# A conversation is one file, <config>/projects/<folder>/<session>.jsonl (plus a <session>/ folder of tool output). This copies
+# it, and the auto-memory, into the new login's projects folder, records the login in ~/.local/state/a0/login (a0-sdk and so the
+# keep-alive read it), stops the running host and resumes the session on the new login in the same pane. The old copy stays
+# where it was; switching back is the same command with the old folder. Run it detached from A0 itself (--after lets the
+# current reply finish writing first). Log: ~/.local/state/a0/switch-login.log.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+new="${1:?config dir, e.g. ~/.claude-siso}"; shift
+after=0; pid=""
+while [ $# -gt 0 ]; do case $1 in --after) after="$2"; shift 2 ;; --pid) pid="$2"; shift 2 ;; *) shift ;; esac; done
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STATE="$HOME/.local/state/a0"; LOG="$STATE/switch-login.log"
+exec >>"$LOG" 2>&1
+echo "== $(date '+%F %T') switch to $new (after ${after}s)"
+sleep "$after"
+seat="$STATE/seat.json"
+session=$(python3 -c "import json;print(json.load(open('$seat'))['session'])")
+pane=$(python3 -c "import json;print(json.load(open('$seat')).get('pane',''))")
+old=$( [ -s "$STATE/login" ] && head -1 "$STATE/login" || echo "$HOME/.config/claude-siso-3" )
+# Source: the newest copy of the session under the old login. Target: the folder for the repo a0-sdk runs from (it cds to $ROOT).
+src=$(dirname "$(ls -t "$old"/projects/*/"$session.jsonl" 2>/dev/null | head -1)")
+[ -f "$src/$session.jsonl" ] || { echo "no $session.jsonl under $old/projects"; exit 1; }
+dst="$new/projects/-$(python3 -c "import os;print(os.path.realpath('$ROOT').lstrip('/').replace('/','-').replace('_','-'))")"
+mkdir -p "$dst"
+# Copy once while the host still runs, so any failure stops here with Agent Zero untouched; the copy after the stop is the tail.
+cp -p "$src/$session.jsonl" "$dst/.$session.jsonl.part"
+"$ROOT/bin/a0-keepalive" pause --minutes 5
+# Stop the running host (its pid is in the host record for the pane), so the file is final before copying.
+rec="$HOME/.local/state/agent-base/hosts/${pane/:/_}.json"   # host records are named w7_p37.json
+[ -n "$pid" ] || pid=$( [ -f "$rec" ] && python3 -c "import json;print(json.load(open('$rec')).get('pid',''))" || true)
+[ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null && for _ in $(seq 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+mkdir -p "$dst"
+if [ -f "$dst/$session.jsonl" ] && ! cmp -s "$src/$session.jsonl" "$dst/$session.jsonl"; then
+  arch="$HOME/SISO_Workspace/_archive/$(date +%F)-a0-session-move"; mkdir -p "$arch"
+  mv "$dst/$session.jsonl" "$arch/$session.$(basename "$new").jsonl"
+  echo "$(date +%F) $session.$(basename "$new").jsonl: older copy of A0's session found at $dst when moving A0 to $new" >> "$arch/MANIFEST"
+fi
+cp -p "$src/$session.jsonl" "$dst/" && rm -f "$dst/.$session.jsonl.part"
+[ -d "$src/$session" ] && rsync -a "$src/$session/" "$dst/$session/"
+if [ -d "$src/memory" ]; then
+  mkdir -p "$dst/memory"
+  for f in "$src"/memory/*.md; do b=$(basename "$f"); [ "$b" = MEMORY.md ] || cp -p "$f" "$dst/memory/$b"; done
+  touch "$dst/memory/MEMORY.md"
+  while IFS= read -r line; do grep -qxF -- "$line" "$dst/memory/MEMORY.md" || echo "$line" >> "$dst/memory/MEMORY.md"; done < "$src/memory/MEMORY.md"
+fi
+cmp -s "$src/$session.jsonl" "$dst/$session.jsonl" && echo "copied $session ($(du -h "$dst/$session.jsonl" | cut -f1))"
+echo "$new" > "$STATE/login"
+herdr pane run "$pane" "$ROOT/bin/a0-sdk --resume $session"
+"$ROOT/bin/a0-keepalive" resume
+echo "resumed $session on $new in $pane"

@@ -1,0 +1,81 @@
+#!/bin/sh
+# roles-cycle: the standing infrastructure owners run in a mode (Shaan, 8 Oct ~20:45: "I don't want the efficiency and HealthAgent
+# to get fresh turns every 90 minutes ... we should have modes like slash goal mode and then just idle ping when I need them or
+# when we message them ... these are their goals right now").
+#   roles-cycle mode                   each owner's mode
+#   roles-cycle mode NAME goal|idle    goal: it gets its next turn as soon as it goes idle, working its goal, until it returns
+#                                      blocked twice in a row with its number unchanged (then it drops to idle, reason logged);
+#                                      idle: it works only when he or Agent Zero messages it
+#   roles-cycle                        one pass (launchd com.siso.roles-cycle, every 10 minutes)
+# Owners: efficiency and health (Astra roles: `role run`, which sends the full role only when it changed), ESTATE (a Claude
+# owner in a herdr pane: one host-tell line; its card's "mode": "idle" stops it), and any project owner set to goal mode, e.g.
+# AB-ZERO (Shaan, 8 Oct ~20:55: "how can we make that in a way where we don't need to do anything but it's actually going to get
+# work done"): when it has been idle 10 minutes with open asks in its queue, it gets "next item"; six such turns without its
+# open count falling drops it to idle (it is waiting on something, not working). While the 1-minute load is above the core
+# count or memory is under 30% free (the 8 Oct load storm), only efficiency and health get turns.
+Z="$(cd "$(dirname "$0")/.." && pwd)"; H="$HOME/.local/state/agent-base/hosts"; LOG="$HOME/.local/state/a0/roles-cycle.log"
+M="$HOME/.local/state/a0/role-modes.json"
+[ -f "$M" ] || echo '{"efficiency": "goal", "health": "goal", "ESTATE": "goal"}' > "$M"
+say() { echo "$(date '+%d %b %H:%M') $*" >> "$LOG"; }
+mode() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],'idle'))" "$M" "$1"; }
+setmode() { python3 -c "import json,sys;d=json.load(open(sys.argv[1]));d[sys.argv[2]]=sys.argv[3];json.dump(d,open(sys.argv[1],'w'),indent=1)" "$M" "$1" "$2"; }
+if [ "${1:-}" = mode ]; then
+  [ -n "${3:-}" ] && { setmode "$2" "$3"; say "$2: mode $3 (set by hand)"; }
+  cat "$M"; exit 0
+fi
+cores=$(sysctl -n hw.ncpu); load=$(sysctl -n vm.loadavg | awk '{print int($2)}')
+free=$(memory_pressure 2>/dev/null | awk -F': ' '/free percentage/{print int($2)}')
+# Busy (load above the cores, or memory under 30% free): skip ESTATE and project owners, but never efficiency and health, whose goal
+# is the load itself (9 Oct: the guard skipped EFFICIENCY from 03:21 to 05:50 while the load ran 20 to 98).
+busy=; if [ "$load" -gt "$cores" ] || [ "${free:-0}" -lt 30 ]; then busy=1; say "busy: load $load on $cores cores, memory ${free}% free; only efficiency and health get turns"; fi
+state() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" "$1" 2>/dev/null; }
+for n in efficiency health; do
+  [ "$(mode "$n")" = goal ] || continue
+  N=$(printf %s "$n" | tr '[:lower:]' '[:upper:]')
+  pgrep -f "bin/role run $n" >/dev/null && continue
+  [ "$(state "$H/name-$N.json")" = idle ] || continue
+  # Two blocked returns in a row with the number unchanged: stop spending, drop to idle, say why.
+  stuck=$(python3 - "$Z/roles/$n.jsonl" <<'PY'
+import json, re, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()][-2:]
+def flat(r):
+    m = re.findall(r"([-\d.]+%?)\s*(?:->|→)\s*([-\d.]+%?|undefined)", r.get("number") or "")
+    return str(r.get("status", "")).startswith("blocked") and all(a == b for a, b in m)
+print("yes" if len(rows) == 2 and all(flat(r) for r in rows) else "no")
+PY
+)
+  if [ "$stuck" = yes ]; then setmode "$n" idle; say "$n: blocked twice with its number unchanged; now idle until messaged"; continue; fi
+  nohup "$Z/bin/role" run "$n" >/dev/null 2>&1 &
+  say "$n: goal mode, next turn sent"
+done
+[ -n "$busy" ] && exit 0
+if [ "$(mode ESTATE)" = goal ]; then
+  if [ "$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.local/state/a0/owners/ESTATE.json'))).get('mode',''))" 2>/dev/null)" = idle ]; then
+    setmode ESTATE idle; say "ESTATE: its card says idle"; set --; else set -- go; fi
+  [ "${1:-}" = go ] && for f in "$H"/w*_p*.json; do
+    [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('name',''))" "$f" 2>/dev/null)" = ESTATE ] || continue
+    [ "$(state "$f")" = idle ] || break
+    pane=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['pane'])" "$f")
+    "$Z/bin/host-tell" "$pane" "Agent Zero (goal mode): your next turn on laptop and Mac mini storage and data security, biggest step first; measure, update your card and PLAN. At target or blocked: put \"mode\": \"idle\" on your card and I stop." >/dev/null 2>&1
+    say "ESTATE: goal mode, next turn sent ($pane)"; break
+  done
+fi
+
+# Project owners in goal mode (anything in the modes file besides the three above).
+QUEUE_OF() { case "$1" in AB-ZERO) echo AGENT-BASE;; *) echo "$1";; esac; }
+for o in $(python3 -c "import json,sys;print(' '.join(k for k,v in json.load(open(sys.argv[1])).items() if v=='goal' and k not in ('efficiency','health','ESTATE')))" "$M"); do
+  # Laptop panes (w*_p*.json) or Mac mini owners (remote-*.json, told by name through host-tell); newest record wins.
+  f=$(grep -l "\"name\": *\"$o\"" "$H"/w*_p*.json "$H"/remote-*.json 2>/dev/null | xargs ls -t 2>/dev/null | head -1); [ -n "$f" ] || continue
+  [ "$(state "$f")" = idle ] || continue
+  age=$(python3 -c "import json,sys,time;d=json.load(open(sys.argv[1]));u=d.get('updatedAt') or 0;print(int(time.time()-(u/1000 if u>1e12 else u)))" "$f")
+  [ "${age:-0}" -ge 600 ] || continue
+  q=$(QUEUE_OF "$o"); open=$("$Z/bin/ask" queue "$q" --json 2>/dev/null | python3 -c 'import json,sys;print(sum(len(g.get("asks",[])) for g in json.load(sys.stdin)["groups"]))' 2>/dev/null || echo 0)
+  [ "${open:-0}" -gt 0 ] || continue
+  t="$HOME/.local/state/a0/goal-$o"; read -r last tries < "$t" 2>/dev/null || { last=$open; tries=0; }
+  if [ "$open" -lt "$last" ]; then tries=0; else tries=$((tries+1)); fi
+  if [ "$tries" -gt 6 ]; then setmode "$o" idle; rm -f "$t"; say "$o: six turns without its queue moving ($open open); now idle until messaged"; continue; fi
+  echo "$open $tries" > "$t"
+  pane=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('pane') or sys.argv[2])" "$f" "$o")
+  "$Z/bin/host-tell" "$pane" "Agent Zero (goal mode): you've been idle 10 minutes with $open open asks (bin/ask queue $q). Take the next one in your priority lane and ship it; don't wait for Shaan's go (ADR 0005)." >/dev/null 2>&1
+  say "$o: goal mode, next item sent ($open open, try $tries)"
+done

@@ -1,0 +1,221 @@
+{
+  "_why": "The whole of SISO as projects > sub-projects > the agent that owns each, kept by Agent Zero (ADR 0002: it keeps the data). bin/siso-map renders it with live state, cards and each owner's queue; Agent Base's side nav reads the same data once t-0562/t-0563 land. Shaan, 8 Oct ~22:10: \"SISO agency is like a main project, it's an agency, and then inside there you've got the agent base, you've got the landing page ... I can kind of use this website to kind of plan out all of my shit\"; ~22:25: \"let's make our base, this app, this site, the back end, figure out how this all fits together, the estate, it needs to be fitted together and reasoned and put in a way where I can see it and we can work with it and improve it\".",
+  "as_of": "2026-10-09 06:15 +07",
+  "projects": [
+    {
+      "id": "siso-agency",
+      "name": "SISO Agency",
+      "what": "The agency: the main project. Everything public ships under it.",
+      "subs": [
+        {
+          "id": "siso-site",
+          "name": "SISO Site",
+          "owner": "SISO-LANDING",
+          "machine": "laptop",
+          "what": "siso.agency: the five products, SISO OS, the showcase for the Claude partners application; subdomains per product, module, industry, blog, library.",
+          "live": "https://siso-ecosystem.siso-agency-showcase.pages.dev",
+          "source": "~/SISO_Workspace/_data/siso-landing"
+        },
+        {
+          "id": "agent-base",
+          "name": "Agent Base (SISO OS)",
+          "owner": "AGENT-BASE",
+          "machine": "mini",
+          "what": "The app he lives in; open-sourced as SISO OS (core + swappable modules). One Opus on the Mac mini with Haiku helpers, one branch, lands everything. AB-ASTRA (Astra, since 9 Oct 05:15) builds the specced asks on astra/<t-id> branches for it to land.",
+          "live": "http://127.0.0.1:5401",
+          "repo": "sisodias/siso-internal-labs-agent-base"
+        },
+        {
+          "id": "ui-hub",
+          "name": "UI Hub",
+          "owner": "UI-DESIGN",
+          "machine": "mini",
+          "what": "Our own 21st.dev (ADR 0007): 21st.dev's structure filled with our catalogue (1,182 items, his 138 picks), bookmarks, shells, layouts, tools; agents use it by CLI and MCP; a SISO OS module. Owners: UI-DESIGN (long-running Opus, the look and integration, since 9 Oct 06:15) and UI-HUB (Astra: previews, speed, libraries, deploys, until Codex runs out).",
+          "live": "https://siso-ui-hub.dtc-storefront.workers.dev",
+          "repo": "sisodias/siso-ui-hub"
+        },
+        {
+          "id": "sites",
+          "name": "Sites and the claim engine",
+          "owner": "SISO-AGENCY",
+          "machine": "laptop",
+          "paused": "tabled by Shaan, 8 Oct: let it cook",
+          "what": "Free sites for businesses on Google Maps (a million by end of 2026, inbound only).",
+          "live": "https://r200.siso-sites.pages.dev/best/"
+        },
+        {
+          "id": "voice",
+          "name": "SISO Voice",
+          "owner": "VOICE",
+          "machine": "mini",
+          "what": "Its own MIT app and a SISO OS module (the user's own Groq key); the helper runs as launchd com.siso.agent-base.voice on the laptop. VOICE, a long-running Opus on the Mac mini since 9 Oct 06:05 (Shaan: \"a world class voice app\"), owns it; AGENT-BASE lands."
+        }
+      ],
+      "helpers": [
+        {
+          "name": "IMAGE-GEN",
+          "kind": "service",
+          "machine": "mini",
+          "what": "Image generation (Astra fanning out Luna): a couple of images per industry, a shared set, client heroes and footers; took over from IMAGE-BRAIN 9 Oct 00:05.",
+          "live": "http://127.0.0.1:8961/gallery/"
+        },
+        {
+          "name": "MERCH",
+          "kind": "goal",
+          "machine": "mini",
+          "what": "Goal agent (Astra), 9 Oct 02:20: merch images for the SISO site's 'merch coming soon' (hoodies, tees, a knit runner, a skeleton watch, all with the real lion mark); hands picks to SISO-LANDING, then stops."
+        },
+        {
+          "name": "LANDING-ART",
+          "kind": "goal",
+          "machine": "mini",
+          "what": "Goal agent (Astra), 9 Oct 03:20: the last of Codex's week on the SISO site's images (the 13 GEN-IMAGE slots, OG cards, the second half of the industry sets beside IMAGE-GEN); stops when Codex refuses."
+        }
+      ]
+    },
+    {
+      "id": "halo",
+      "name": "HALO",
+      "what": "Private. Never named publicly.",
+      "subs": [
+        {
+          "id": "halo-base",
+          "name": "HALO base (CRM)",
+          "owner": null,
+          "machine": "laptop",
+          "what": "The whole HALO base: CRM, Discord, sheets, the VPS. Its own owner is wanted (Shaan, 22:58)."
+        },
+        {
+          "id": "streaming",
+          "name": "Streaming",
+          "owner": "STREAMING",
+          "machine": "laptop",
+          "what": "The specialised owner inside HALO base.",
+          "goals": [
+            {
+              "name": "Operator UI",
+              "agent": "OPERATOR-UI",
+              "note": "Shaan talks to it directly"
+            },
+            {
+              "name": "Go-live testing",
+              "agent": "HALO-GOLIVE"
+            },
+            {
+              "name": "Signing",
+              "agent": "HALO-SIGNING"
+            },
+            {
+              "name": "Lean",
+              "agent": "HALO-LEAN"
+            },
+            {
+              "name": "Robust",
+              "agent": "HALO-ROBUST"
+            },
+            {
+              "name": "Model 2",
+              "agent": "HALO-MODEL-2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "research",
+      "name": "Research",
+      "what": "A standalone department: agents with every search tool (GitHub, X, YouTube, search APIs) mapping domains into the Foundry (ADR 0006). One per question, spun up and down.",
+      "subs": [
+        {
+          "id": "research-domains",
+          "name": "Domains: UI, agent bases, voice",
+          "owner": "RESEARCH",
+          "machine": "mini",
+          "repo": "sisodias/siso-foundry",
+          "goals": [
+            {
+              "name": "Research A",
+              "agent": "ASTRA-RESEARCH-A"
+            },
+            {
+              "name": "Research B",
+              "agent": "ASTRA-RESEARCH-B"
+            }
+          ],
+          "live": "http://100.66.34.21:8766/"
+        }
+      ]
+    },
+    {
+      "id": "infrastructure",
+      "name": "Infrastructure",
+      "what": "What keeps the machines, the data and the agents working.",
+      "subs": [
+        {
+          "id": "agent-zero",
+          "name": "Agent Zero",
+          "owner": "A0",
+          "machine": "laptop",
+          "what": "Turns his words into outcomes; keeps this map, the asks and the owners' state.",
+          "repo": "sisodias/siso-agent-zero"
+        },
+        {
+          "id": "estate",
+          "name": "Estate",
+          "owner": "ESTATE",
+          "machine": "laptop",
+          "what": "Both machines: 100 GB free each, data security, nothing kept that isn't needed.",
+          "repo": "sisodias/siso-estate"
+        },
+        {
+          "id": "efficiency",
+          "name": "Efficiency",
+          "owner": "EFFICIENCY",
+          "machine": "laptop",
+          "what": "Token spend that renews: work kept, windows not burnt."
+        },
+        {
+          "id": "health",
+          "name": "Health",
+          "owner": "HEALTH",
+          "machine": "laptop",
+          "what": "Battery, launchd jobs, load."
+        },
+        {
+          "id": "library",
+          "name": "Great Library",
+          "owner": "LIBRARY",
+          "machine": "laptop",
+          "paused": "paused by Agent Zero 7 Oct (disk)",
+          "what": "Everything we know, in one reader, on a private Cloudflare Worker.",
+          "repo": "sisodias/great-library-of-siso"
+        }
+      ]
+    },
+    {
+      "id": "playground",
+      "name": "Playground",
+      "what": "Any agent that fits no project: his experiments, and anything not yet placed (t-0562's reconciler puts unknown agents here, never a guess).",
+      "subs": [
+        {
+          "id": "pg-browser",
+          "name": "Browser",
+          "owner": "BROWSER",
+          "machine": "laptop"
+        },
+        {
+          "id": "pg-kikas",
+          "name": "Kikas",
+          "owner": "KIKAS",
+          "machine": "laptop"
+        },
+        {
+          "id": "pg-model-app",
+          "name": "Model App",
+          "owner": "MODEL-APP",
+          "machine": "laptop"
+        }
+      ]
+    }
+  ]
+}
