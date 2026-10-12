@@ -1,0 +1,12 @@
+#!/bin/sh
+# research-sync: publish Agent Base's research base (the project checkout's research/, written by SCOUT and the MINERs) to GitHub
+# through a clean worktree on origin/main, so the shared checkout (behind origin, with others' dirty work) is never touched.
+set -eu
+P=$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agents
+W=$HOME/SISO_Workspace/_data/worktrees/siso-internal-labs-agents/research-push
+[ -d "$W" ] || git -C "$P" worktree add -q "$W" origin/main
+cd "$W"; git fetch -q origin; git checkout -q --detach origin/main
+rsync -a "$P/research/" "$W/research/"
+git add research; git diff --cached --quiet && { echo "research-sync: nothing new"; exit 0; }
+git commit -qm "research base: $(git diff --cached --stat | tail -1 | sed 's/^ *//') (research-sync)"
+git push -q origin HEAD:main && echo "research-sync: pushed $(git rev-parse --short HEAD)"

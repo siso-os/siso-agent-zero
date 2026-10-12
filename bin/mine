@@ -1,0 +1,22 @@
+#!/bin/sh
+# mine: start MINER chats for Agent Base's research team (Shaan, 4 Oct: "an agent or skill which we can have parallel agents of going
+# through this and mining ideas and code and finding all of the codes that can be robbed ... collected the data so a smarter agent can
+# reason"). Each miner is a hosted Codex chat (Sol 6.1, high) named MINER-<slug>, crew of MINER in the Agent Base project: he can open
+# and message it. Its answer lands in the project's research/mined/<slug>.md and its ideas go into research/ideas.jsonl.
+#   mine "<theme or repo to dig into>" [slug]     one miner; run several for parallel miners
+#   mine wait                                     until every miner started here has returned (prints who)
+set -eu
+Z="$(cd "$(dirname "$0")/.." && pwd)"
+P=$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agents
+AB=$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host
+S=$HOME/.local/state/a0/mine; mkdir -p "$S" "$P/research/mined" "$HOME/SISO_Workspace/_reference/harness-rob"
+if [ "${1:-}" = wait ]; then while [ "$(ls "$S"/*.running 2>/dev/null | wc -l)" -gt 0 ]; do sleep 30; done; cat "$S/done.log"; exit 0; fi
+what="${1:?what to mine}"; slug="${2:-$(printf %s "$what" | tr -cs 'A-Za-z0-9' '-' | tr '[:lower:]' '[:upper:]' | cut -c1-24 | sed 's/-$//')}"
+name="MINER-$slug"; brief="$S/$name.txt"
+sed -e "s|{WHAT}|$what|g" -e "s|{SLUG}|$slug|g" "$Z/roles/miner.tpl" > "$brief"
+curl -s -X POST -H 'content-type: application/json' --data "{\"op\":\"register\",\"name\":\"$name\",\"project\":\"Agent Base\",\"domain\":\"Research\",\"owner\":\"MINER\",\"kind\":\"worker\",\"role\":\"Miner: $what\"}" http://127.0.0.1:5401/api/registry >/dev/null || true
+( cd "$HOME/SISO_Workspace/_reference/harness-rob" && HERDR_ENV=0 nohup node --experimental-strip-types --no-warnings "$AB/src/service-runner.ts" --harness codex --name "$name" --model gpt-6.1-sol --effort high > "$S/$name.host.log" 2>&1 & )
+touch "$S/$name.running"
+( sleep 20; "$AB/bin/siso-host-service" send --name "$name" --prompt-file "$brief" --timeout 10800 > "$P/research/mined/$slug.reply.md" 2> "$S/$name.err"
+  echo "$(date +%H:%M) $name rc=$?" >> "$S/done.log"; rm -f "$S/$name.running" ) >/dev/null 2>&1 &
+echo "$name started: open it under Agent Base -> MINER; its findings: research/mined/$slug.md"

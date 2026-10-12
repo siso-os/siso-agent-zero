@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""look: Agent Zero's whole Look step on one screen, in one call (about 2 s).
+
+Shaan, 4 Oct 2026: "give agent zero the best tools to actually find and do the shit it needs to do fast as fuck 90% faster ...
+for less tokens". Measured that day: 190 of Agent Zero's 1,896 calls were status checks done one source at a time (queue, live,
+fleets, jobs, git, launchd). This answers all of them at once, in at most ~30 lines.
+
+  look          the screen
+  look --json   the same, for a script
+"""
+import glob, json, os, subprocess, sys, datetime, re
+
+HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+H = os.path.expanduser("~")
+RUNNER = f"{H}/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base/ship-runner"
+
+
+def sh(*cmd, timeout=40):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def doctor():
+    try:
+        rows = json.loads(sh(os.path.join(HOME, "bin/stack-doctor"), "--json"))
+        rows = rows.get("checks", rows) if isinstance(rows, dict) else rows
+        return [f"{'RED' if r['level'] == 'red' else 'amb'} {r['name']}: {r['detail'][:110]}" for r in rows if r.get("level") in ("red", "amber")]
+    except Exception:
+        return [l.strip()[:130] for l in sh(os.path.join(HOME, "bin/stack-doctor")).splitlines() if l.strip()[:1] in ("✗", "!")]
+
+
+def shipping():
+    out = []
+    q = f"{H}/.local/state/agent-base/ship-queue/queue.jsonl"
+    last = {}
+    for l in open(q) if os.path.exists(q) else []:
+        try:
+            r = json.loads(l); last[r["id"]] = {**last.get(r["id"], {}), **r}
+        except (ValueError, KeyError):
+            pass
+    active = [r for r in last.values() if r.get("state") in ("queued", "running", "checking", "landing", "landed") and r.get("at", "") > (datetime.datetime.now() - datetime.timedelta(hours=6)).isoformat()]
+    for r in sorted(active, key=lambda r: r.get("at", ""))[-3:]:
+        out.append(f"{r['id']} {r.get('state')} {r.get('branch', '')} {r.get('sha', '')[:7]} {r.get('why', '')[:70]}")
+    live = ""
+    lj = f"{H}/.local/state/agent-base/live/live.jsonl"
+    if os.path.exists(lj):
+        live = json.loads(open(lj).read().strip().splitlines()[-1]).get("sha", "")[:7]
+    main = sh("git", "-C", RUNNER, "rev-parse", "--short=7", "origin/main").strip()
+    out.insert(0, f"Agent Base live {live} · main {main}" + ("" if live == main else "  (live is behind main)"))
+    return out
+
+
+def jobs():
+    """What Agent Zero sent out and what came back (Shaan, 4 Oct: "we must have spawned off 10 different things and unless i'm relying
+    from memory or i ask you there's no way to find out what we spawned off and what i'm expecting back"). From codex-run's run records."""
+    out, now = [], datetime.datetime.now().timestamp()
+    latest = {}
+    # A run Agent Zero has dealt with (landed, superseded, handed to the UI chat) is closed: one line in closed.jsonl
+    # ({"name", "at" epoch, "why"}); it leaves Out until that name is sent again.
+    closed = {}
+    for l in open(f"{H}/.local/state/a0/closed.jsonl") if os.path.exists(f"{H}/.local/state/a0/closed.jsonl") else []:
+        try:
+            c = json.loads(l); closed[c["name"]] = max(closed.get(c["name"], 0), c["at"])
+        except (ValueError, KeyError):
+            pass
+    for f in glob.glob(f"{H}/.local/state/codex-run/runs/*.meta.json"):
+        try:
+            m = json.load(open(f))
+        except ValueError:
+            continue
+        if now - m.get("started", 0) < 6 * 3600 and m.get("started", 0) >= latest.get(m.get("name"), ({}, 0))[1]:
+            latest[m.get("name")] = ({**m, "base": f[:-10]}, m.get("started", 0))
+    for name, (m, started) in sorted(latest.items(), key=lambda kv: kv[1][1]):
+        if closed.get(name, 0) > started:
+            continue
+        try:
+            os.kill(m["pid"], 0); state = "running"
+        except (OSError, KeyError):
+            last = m["base"] + ".last.md"
+            text = open(last, errors="ignore").read() if os.path.exists(last) else ""
+            state = text.split("STATUS:", 1)[1].split("\n", 1)[0].split("—")[0].strip() if "STATUS:" in text else "stopped"
+            if now - started > 3 * 3600 and state != "running":
+                continue
+        out.append(f"{datetime.datetime.fromtimestamp(started):%H:%M} {name} · {state} · {round((now - started) / 60)} min" + (f" · {m['worker']}" if m.get("worker") else ""))
+    for man in glob.glob(f"{H}/.local/state/fleet/*/manifest.json"):
+        try:
+            m = json.load(open(man)); js = m.get("jobs", {})
+            states = [j.get("state") for j in (js.values() if isinstance(js, dict) else js)]
+            if any(s in ("running", "queued") for s in states):
+                out.append(f"fleet {os.path.basename(os.path.dirname(man))}: {states.count('done')}/{len(states)} done")
+        except Exception:
+            pass
+    return out or ["nothing out"]
+
+
+def tasks():
+    rows = []
+    for f in glob.glob(f"{HOME}/tasks/*.json"):
+        if f.endswith("INDEX.json"):
+            continue
+        try:
+            rows.append(json.load(open(f)))
+        except ValueError:
+            pass
+    open_ = [t for t in rows if t.get("stage") not in ("live", "dropped", "happy")]
+    fresh = sorted([t for t in open_ if t.get("stage") == "thought"], key=lambda t: t.get("created", ""), reverse=True)[:3]
+    return [f"{len(open_)} open, {sum(1 for t in open_ if t.get('stage') == 'thought')} not started"] + [f"{t['id']} {t.get('priority', '')} {t.get('title', '')[:90]}" for t in fresh]
+
+
+def pipeline():
+    try:
+        d = json.loads(sh(os.path.join(HOME, "bin/pipeline"), "--json"))
+        m = d["median_min"]; rows = d["rows"]
+        return [f"{sum(r['at'] == 'live' for r in rows)} of {len(rows)} Agent Base tickets live (7 d) · median words->live {m['total']} min · slowest stage: {d['slowest']}"]
+    except Exception:
+        return []
+
+
+def roles():
+    return [l for l in sh(os.path.join(HOME, "bin/role")).splitlines() if l.strip()]
+
+
+def his_words():
+    days = sorted(glob.glob(f"{HOME}/.agents/a0/transcript/raw/*.jsonl"))[-1:]
+    rows = [json.loads(l) for d in days for l in open(d) if l.strip()]
+    return [f"{r['at'][11:16]} {r['text'][:110]}" for r in rows[-3:]]
+
+
+def main():
+    sections = [("Stack", doctor()), ("Shipping", shipping()), ("Out (sent, not back yet)", jobs()), ("Tasks", tasks()), ("Pipeline", pipeline()), ("Roles (estate, health, efficiency)", roles()), ("His latest words", his_words())]
+    if "--json" in sys.argv:
+        print(json.dumps(dict(sections), indent=1)); return 0
+    for name, lines in sections:
+        print(f"== {name}")
+        for l in lines or ["-"]:
+            print(f"  {l}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,67 @@
+{
+ "1": {
+  "n": 1,
+  "answer": "No. Use remaining credits and the banked reset for real work, with Sol for judgment.",
+  "source": "routing.json:8"
+ },
+ "2": {
+  "n": 2,
+  "answer": "Exactly @AGENTS.md.",
+  "source": "jobs/five-bykonz.md:17"
+ },
+ "3": {
+  "n": 3,
+  "answer": "Agent Base.",
+  "source": "projects.json:6"
+ },
+ "4": {
+  "n": 4,
+  "answer": "The runner checkout lacked Playwright, causing a false live-smoke failure.",
+  "source": ".agents/HANDOFF-HISTORY.md:25"
+ },
+ "5": {
+  "n": 5,
+  "answer": "\u201cAnd no sim links, sim links break stuff, sim links aren't good.\u201d",
+  "source": ".agents/a0/transcript/raw/2026-10-04.jsonl:2"
+ },
+ "6": {
+  "n": 6,
+  "answer": "Question, Answer, Evidence, For us, Confidence, Unknown.",
+  "source": "PRINCIPLES.md:66"
+ },
+ "7": {
+  "n": 7,
+  "answer": "Read its panic/shutdown logs to establish why it died.",
+  "source": ".agents/memory/mac-mini.md:7"
+ },
+ "8": {
+  "n": 8,
+  "answer": "38 suites.",
+  "source": ".agents/HANDOFF-HISTORY.md:8"
+ },
+ "9": {
+  "n": 9,
+  "answer": "Only Shaan may type it.",
+  "source": "AGENTS.md:57"
+ },
+ "10": {
+  "n": 10,
+  "answer": "The ladder: correction \u2192 fact \u2192 rule \u2192 check; each promotion deletes the previous step.",
+  "source": "PRINCIPLES.md:81"
+ },
+ "11": {
+  "n": 11,
+  "answer": "Estate; start with role run estate. Achievements go into roles/estate.jsonl and its home HANDOFF.",
+  "source": "roles/estate.md:5; AGENTS.md:46; roles/estate.md:14"
+ },
+ "12": {
+  "n": 12,
+  "answer": "codex-lanes.",
+  "source": "AGENTS.md:96"
+ },
+ "13": {
+  "n": 13,
+  "answer": "No messages, pings, notifications, or typing into agents or panes.",
+  "source": "roles/health.md:16"
+ }
+}

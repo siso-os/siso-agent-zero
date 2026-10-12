@@ -1,0 +1,190 @@
+{
+ "meta": {
+  "title": "How to work with Agent Zero",
+  "description": "Shaan's guide: when to talk to Agent Zero, when to talk to another agent, how to say what you want, and the five skills.",
+  "stream": "agents",
+  "crumb": [
+   {
+    "label": "Agent Zero"
+   },
+   {
+    "label": "How to work with it"
+   }
+  ],
+  "actions": [],
+  "source": "SISO_Agents/agent-zero/siso-agent-zero/docs/HOW-TO-WORK-WITH-AGENT-ZERO.md (4 Oct 2026)"
+ },
+ "heading": {
+  "breadcrumb": [
+   {
+    "label": "Agent Zero"
+   },
+   {
+    "label": "docs"
+   },
+   {
+    "label": "how to work with it"
+   }
+  ],
+  "kicker": "guide <span class=\"sep\">·</span> for Shaan",
+  "title": "Talk to Agent Zero. One voice in.",
+  "subtitle": "When to talk to whom, how to say what you want in 30 seconds, and the five skills that make the system work for you.",
+  "badges": [
+   {
+    "label": "guide · for Shaan",
+    "tone": "research",
+    "dot": true
+   },
+   {
+    "label": "9 sections",
+    "tone": "research",
+    "href": "#the-one-rule"
+   }
+  ],
+  "status": {
+   "kicker": "Source",
+   "value": "d871419 · 4 Oct 2026 02:12",
+   "note": "docs/HOW-TO-WORK-WITH-AGENT-ZERO.md in siso-agent-zero, built from five sourced research files (research/agent-zero-v2)."
+  },
+  "metrics": [
+   {
+    "value": 9,
+    "label": "sections",
+    "tone": "research",
+    "href": "#the-one-rule"
+   },
+   {
+    "value": 5,
+    "label": "skills for you",
+    "tone": "now",
+    "href": "#getting-better-at-it-your-five-skills"
+   },
+   {
+    "value": 5,
+    "label": "research files behind it",
+    "tone": "research",
+    "href": "#evidence"
+   }
+  ],
+  "jump": [
+   {
+    "label": "The one rule",
+    "href": "#the-one-rule"
+   },
+   {
+    "label": "When to talk to Agent Zero",
+    "href": "#when-to-talk-to-agent-zero-almost-always"
+   },
+   {
+    "label": "When to talk to another agent directly",
+    "href": "#when-to-talk-to-another-agent-directly-rare"
+   },
+   {
+    "label": "How to say what you want",
+    "href": "#how-to-say-what-you-want-30-seconds-by-voice"
+   },
+   {
+    "label": "What comes back to you",
+    "href": "#what-comes-back-to-you"
+   }
+  ]
+ },
+ "sections": {
+  "abstract": {
+   "n": "00",
+   "title": "Abstract",
+   "sub": "the document's own opening, verbatim"
+  },
+  "evidence": {
+   "n": "04",
+   "title": "Evidence · version",
+   "sub": "what this page renders, from which bytes; the claim ceiling"
+  }
+ },
+ "abstract": {
+  "lede": "Shaan, 4 Oct 2026: \"teach me how you want me to actually interact with the system through you. When to talk to you, when to talk to other agents ... Sometimes I need to upskill myself.\" Built from what the labs and the best operators do (`research/agent-zero-v2/human-operator.md`) and from what went wrong for us in September and October."
+ },
+ "contents": {
+  "from": "from its h2 · h3"
+ },
+ "chapters": [
+  {
+   "id": "the-one-rule",
+   "n": "01",
+   "title": "The one rule",
+   "subs": [],
+   "html": "<p><strong>Talk to Agent Zero.</strong> One voice in. It turns what you say into jobs, runs them on the right model, checks them, lands them, and shows you what needs your eye. Two thirds of our tokens on 2-3 Oct went on agents talking to agents; one front door fixes that.</p>"
+  },
+  {
+   "id": "when-to-talk-to-agent-zero-almost-always",
+   "n": "02",
+   "title": "When to talk to Agent Zero (almost always)",
+   "subs": [],
+   "html": "<ul><li>Anything new: an idea, a bug, a client ask, a feeling that something is off.</li><li>&quot;Where are we?&quot; You get X of Y, what is live, and the one thing only you can do.</li><li>Feedback on something you were shown.</li><li>Changing priorities, or stopping something.</li></ul>"
+  },
+  {
+   "id": "when-to-talk-to-another-agent-directly-rare",
+   "n": "03",
+   "title": "When to talk to another agent directly (rare)",
+   "subs": [],
+   "html": "<ul><li>Only when you are sitting with <strong>the one coder</strong> on a project for fast taste back-and-forth (tuning a screen together). Agent Zero tells you which agent that is. When you are done, tell Agent Zero &quot;finished with X&quot; so it picks the thread back up.</li><li>Never relay between agents, and never ask one agent what another did. Ask Agent Zero; it reads their files.</li></ul>"
+  },
+  {
+   "id": "how-to-say-what-you-want-30-seconds-by-voice",
+   "n": "04",
+   "title": "How to say what you want (30 seconds, by voice)",
+   "subs": [],
+   "html": "<ol><li><strong>Done when:</strong> what is true when it is finished (&quot;I can open the Tokens page and see today&#x27;s spend per model&quot;).</li><li><strong>Why</strong>, in one line, so the trade-offs go your way.</li><li><strong>Must work or taste?</strong> &quot;This must never break&quot; gets a test. &quot;I&#x27;ll judge it by eye&quot; gets a screenshot.</li><li><strong>Hands off:</strong> what must not change (&quot;don&#x27;t touch my side nav&quot;).</li></ol>"
+  },
+  {
+   "id": "what-comes-back-to-you",
+   "n": "05",
+   "title": "What comes back to you",
+   "subs": [],
+   "html": "<ul><li><strong>A Look</strong>: a link or screenshot, with your words beside it, only when taste decides. Answer with changes you can see: &quot;more space under the header&quot;, &quot;v2, not v3&quot;, &quot;the old icon was better&quot;.</li><li><strong>The board</strong> (Agent Base) shows everything else as X of Y. Nothing pings you.</li><li><strong>&quot;Needs you&quot;</strong> is only for things only you can do: money, a login, a password, your presence, a call no one else can make.</li></ul>"
+  },
+  {
+   "id": "when-to-interrupt",
+   "n": "06",
+   "title": "When to interrupt",
+   "subs": [],
+   "html": "<p>It is doing the wrong thing, the same fix failed twice, or it touched your design. Say &quot;stop: the outcome is X&quot;. That is all it needs.</p>"
+  },
+  {
+   "id": "what-you-don-t-do-any-more",
+   "n": "07",
+   "title": "What you don't do any more",
+   "subs": [],
+   "html": "<p>Restart agents, relay messages, test things yourself, watch progress, approve every step.</p>"
+  },
+  {
+   "id": "how-the-agents-are-arranged-so-you-know-who-does-what",
+   "n": "08",
+   "title": "How the agents are arranged (so you know who does what)",
+   "subs": [],
+   "html": "<ul><li><strong>One coder per codebase</strong>: two writers in one repo cause conflicts and rework.</li><li><strong>Many researchers</strong>: they read and write findings files in <code>research/</code>, never code, so many can run at once. You can watch them on the Research page; Agent Zero reads their findings and tells you what changed.</li><li><strong>Agent Zero (Opus)</strong> decides, specs, checks and lands. Cheap models (Luna, DeepSeek) do most of the work; Sol and Opus take the hard parts. Which model gets which job is in <code>routing.json</code>.</li></ul>"
+  },
+  {
+   "id": "getting-better-at-it-your-five-skills",
+   "n": "09",
+   "title": "Getting better at it (your five skills)",
+   "subs": [],
+   "html": "<ol><li><strong>Say &quot;done when&quot;.</strong> It is the biggest single lever: a clear finish line is what a machine can check.</li><li><strong>Give taste as changes you can see</strong>, against a screenshot.</li><li><strong>Batch your feedback</strong>: one message with every change beats five.</li><li><strong>Pick from variations.</strong> Ask for three; picking is faster than describing.</li><li><strong>Ask what it cost.</strong> Once a week: tokens per change that went live. It should fall every week.</li></ol>"
+  }
+ ],
+ "evidence": {
+  "facts": [
+   {
+    "claim": "Rendered from <code>docs/HOW-TO-WORK-WITH-AGENT-ZERO.md</code>, sha256 <code>b068da3235b9c239</code>.",
+    "receipt": "shasum -a 256",
+    "at": "4 Oct 2026"
+   },
+   {
+    "claim": "Built on five sourced research files in <code>research/agent-zero-v2/</code>.",
+    "receipt": "fleet agent-zero-v2",
+    "at": "4 Oct 2026"
+   }
+  ]
+ },
+ "related": []
+}

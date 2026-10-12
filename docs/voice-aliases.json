@@ -1,0 +1,13 @@
+{"_why": "Shaan talks by voice; transcription writes some words his way. recall expands a search term to these spellings. Add one whenever a recall misses because of how a word was heard (house-check, 4 Oct: 'symlinks' missed his 'sim links').",
+ "symlink": ["sim link", "simlink", "sym link"],
+ "codex": ["codecs", "codexes"],
+ "claude": ["clawed", "cloud code"],
+ "sol": ["soul", "sole"],
+ "luna": ["lunar", "lunas"],
+ "opus": ["opuses"],
+ "agent zero": ["agent 0", "a0"],
+ "herdr": ["herder", "hurdur"],
+ "fahmy": ["fami", "fahmi"],
+ "deepseek": ["deep seek"],
+ "mac mini": ["mac minis"]
+}

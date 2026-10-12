@@ -1,0 +1,96 @@
+{
+ "_why": "Questions a session that remembers nothing must answer from the house alone (docs/HOUSE.md). Each 'expect' is a list of alternatives; any one (case-insensitive substring) counts. Add a question whenever a recall miss happens.",
+ "questions": [
+  {
+   "q": "Is the Codex (ChatGPT Pro) plan being renewed, and what should its remaining credits be used for?",
+   "expect": [
+    "not renew",
+    "not being renewed",
+    "not be renewed",
+    "isn't renewed",
+    "is not renewed",
+    "won't be renewed",
+    "no. use",
+    "no, use",
+    "no. the"
+   ]
+  },
+  {
+   "q": "What must the whole content of every CLAUDE.md be?",
+   "expect": [
+    "@agents.md"
+   ]
+  },
+  {
+   "q": "Which project currently has all five things Agent Zero's loop needs?",
+   "expect": [
+    "agent base"
+   ]
+  },
+  {
+   "q": "Why did the ship queue roll Agent Base back after its live smoke on 4 Oct around 00:21?",
+   "expect": [
+    "playwright"
+   ]
+  },
+  {
+   "q": "Quote Shaan's exact words about symlinks.",
+   "expect": [
+    "sim links"
+   ]
+  },
+  {
+   "q": "What are the parts of the standard research output shape?",
+   "expect": [
+    "unknown"
+   ]
+  },
+  {
+   "q": "What should Agent Zero do first when the Mac mini comes back online?",
+   "expect": [
+    "panic",
+    "shutdown log",
+    "crash"
+   ]
+  },
+  {
+   "q": "How many Agent Base test suites remain after the 4 Oct Elon pass (it was 99)?",
+   "expect": [
+    "38"
+   ]
+  },
+  {
+   "q": "Who is allowed to run claude-fahmy?",
+   "expect": [
+    "shaan"
+   ]
+  },
+  {
+   "q": "What is the memory rule that makes Agent Zero's memory shrink as it learns called, and how does it work?",
+   "expect": [
+    "ladder"
+   ]
+  },
+  {
+   "q": "Which agent frees disk space on the laptop, what command starts one run of it, and where does it record what it achieved?",
+   "expect": [
+    "role run estate"
+   ]
+  },
+  {
+   "q": "Shaan asks what jobs Agent Zero has sent out and which have come back. What one command answers that?",
+   "expect": [
+    "look"
+   ]
+  },
+  {
+   "q": "May the health role message or ping other agents?",
+   "expect": [
+    "no",
+    "never",
+    "may not",
+    "must not"
+   ]
+  }
+ ]
+}

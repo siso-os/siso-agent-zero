@@ -1,0 +1,8 @@
+{
+  "_why": "bin/renewals reads these plans live. anchor_day overrides the signup day when the real billing day was seen: fuzeheritage went past_due on 3 Oct 2026 though it signed up on 16 Jun 2025. Fahmy's login (claude-fahmy) is never read.",
+  "plans": [
+    {"name": "lordsisodia", "kind": "claude", "config": "~/.config/claude-siso-3", "what": "Claude Max 20x, plain `claude`"},
+    {"name": "fuzeheritage", "kind": "claude", "config": "~/.claude-siso", "anchor_day": 3, "what": "Claude Max 20x, `claude-siso`", "known": "known: Claude Code off by its org since 3 Oct (unpaid); pay at claude.ai/settings/billing to bring it back"},
+    {"name": "codex", "kind": "codex", "what": "ChatGPT Pro, Codex", "known": "not renewing (Shaan 4 Oct): use the credits and the banked weekly reset on real work before it lapses; nothing to pay"}
+  ]
+}

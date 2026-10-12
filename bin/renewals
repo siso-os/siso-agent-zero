@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""renewals: when each paid AI plan renews, read live, with a warning 4, 3, 2 and 1 days before so the allowance gets used
+up first and the card is topped up in time.
+
+Shaan, 3 Oct ~18:30: "I didn't know where my billing cycle completed so usually I don't have money on my cards ... I only
+pay them when I need to ... I didn't know where my card was going to run out today but I'd known I would have rinsed it
+yesterday I don't know where my codex billing runs out either ... notifications a day or two or three or four before".
+
+Sources, read live every run (never printed: tokens; only dates and statuses):
+  Claude logins: GET /api/oauth/profile with the login's Keychain OAuth token -> subscription_status, subscription_created_at.
+  Codex: the id_token claims in ~/.codex/auth.json -> chatgpt_subscription_active_until.
+The renewal day of a Claude plan is its billing anchor. It is taken from config/renewals.json when set there (an anchor
+seen in the wild beats a guess), else from subscription_created_at. Fahmy's login is never read.
+
+  renewals [--json]      every plan: status, next renewal, days left
+  renewals warn          the daily job: a warning (siso-az need: top of his dashboard + laptop notification) at 4/3/2/1
+                         days and on past_due, each once per plan per renewal per day-count
+Exit 0 ok, 1 a plan is past due or could not be read.
+"""
+import argparse, base64, calendar, datetime as dt, hashlib, json, os, subprocess, sys, urllib.request
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+CONF = os.environ.get("RENEWALS_CONF") or os.path.join(HERE, "renewals.json")
+STATE = os.environ.get("RENEWALS_STATE") or os.path.expanduser("~/.local/state/renewals")
+WARN_DAYS = (4, 3, 2, 1, 0)
+LOCAL = dt.datetime.now().astimezone().tzinfo
+
+
+def keychain_oauth(cfg):
+    svc = "Claude Code-credentials-" + hashlib.sha256(os.path.expanduser(cfg).encode()).hexdigest()[:8]
+    raw = subprocess.run(["security", "find-generic-password", "-s", svc, "-w"], capture_output=True, text=True).stdout.strip()
+    try:
+        return json.loads(raw)["claudeAiOauth"]["accessToken"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def next_anchor(day, hour_utc, now):
+    """The next date on/after now with this day of month (clamped to the month's last day), at hour_utc UTC."""
+    y, m = now.year, now.month
+    for _ in range(3):
+        d = min(day, calendar.monthrange(y, m)[1])
+        t = dt.datetime(y, m, d, hour_utc, tzinfo=dt.timezone.utc)
+        if t > now:
+            return t
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return None
+
+
+def claude_plan(p, now):
+    tok = keychain_oauth(p["config"])
+    if not tok:
+        return {"status": "unreadable", "why": "no OAuth token in the Keychain for " + p["config"]}
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/profile",
+                                 headers={"Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20"})
+    try:
+        org = json.loads(urllib.request.urlopen(req, timeout=15).read()).get("organization") or {}
+    except Exception as e:
+        return {"status": "unreadable", "why": f"profile endpoint: {getattr(e, 'code', e)}"}
+    created = org.get("subscription_created_at")
+    anchor = p.get("anchor_day")
+    hour = p.get("anchor_hour_utc")
+    if created:
+        c = dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
+        anchor = anchor or c.day
+        hour = c.hour if hour is None else hour
+    nxt = next_anchor(anchor, hour or 0, now) if anchor else None
+    return {"status": org.get("subscription_status") or "unknown", "tier": org.get("rate_limit_tier"),
+            "renews": nxt.isoformat() if nxt else None, "anchor": f"day {anchor}" + (" (from config)" if p.get("anchor_day") else " (from signup)"),
+            "pay_link": "https://claude.ai/settings/billing" if org.get("payment_auth_hosted_invoice_url") else None}
+
+
+def codex_plan(p, now):
+    try:
+        idt = json.load(open(os.path.expanduser("~/.codex/auth.json")))["tokens"]["id_token"]
+        seg = idt.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))).get("https://api.openai.com/auth", {})
+    except Exception as e:
+        return {"status": "unreadable", "why": f"~/.codex/auth.json: {e.__class__.__name__}"}
+    until = claims.get("chatgpt_subscription_active_until")
+    if not until:
+        return {"status": "unreadable", "why": "no subscription date in the Codex login"}
+    u = dt.datetime.fromisoformat(until)
+    while u <= now:  # the claim is only as fresh as the login's last token refresh; a paid month rolls it on
+        u = next_anchor(u.day, u.hour, u + dt.timedelta(minutes=1))
+    return {"status": "active" if dt.datetime.fromisoformat(until) > now else "renewed or lapsed (log in to Codex to refresh)",
+            "tier": claims.get("chatgpt_plan_type"), "renews": u.isoformat(), "anchor": f"day {u.day} (from the Codex login)"}
+
+
+def survey():
+    now = dt.datetime.now(dt.timezone.utc)
+    rows = []
+    for p in json.load(open(CONF))["plans"]:
+        r = (claude_plan if p["kind"] == "claude" else codex_plan)(p, now)
+        r.update(name=p["name"], kind=p["kind"], what=p.get("what", ""))
+        if r.get("renews"):
+            t = dt.datetime.fromisoformat(r["renews"])
+            r["days_left"] = (t.astimezone(LOCAL).date() - now.astimezone(LOCAL).date()).days
+            r["renews_local"] = t.astimezone(LOCAL).strftime("%a %d %b %H:%M")
+        rows.append(r)
+    return rows
+
+
+def show(rows):
+    for r in rows:
+        when = f"renews {r['renews_local']} ({r['days_left']} day{'s' if r['days_left'] != 1 else ''})" if r.get("renews") else r.get("why", "")
+        print(f"{r['name']:13} {r['status']:10} {when}  [{r.get('tier') or '?'}; {r.get('anchor', '')}]")
+
+
+def warn(rows):
+    os.makedirs(STATE, exist_ok=True)
+    sent_path = os.path.join(STATE, "sent.json")
+    try:
+        sent = json.load(open(sent_path))
+    except Exception:
+        sent = {}
+    out = []
+    KNOWN = {p["name"]: p["known"] for p in json.load(open(CONF))["plans"] if p.get("known")}  # decided states (Shaan)
+    for r in rows:
+        msg = key = None
+        if r["status"] in ("past_due", "unpaid", "canceled"):
+            key = f"{r['name']}:{r['status']}:{r.get('renews', '')[:7]}"  # once per billing month: a plan left unpaid on purpose is not nagged daily
+            msg = f"{r['name']} ({r['what']}) is {r['status'].replace('_', ' ')}: pay at claude.ai/settings/billing or it stays locked"
+        elif r.get("days_left") is not None and r["days_left"] in WARN_DAYS:
+            key = f"{r['name']}:{r['renews'][:10]}:{r['days_left']}"
+            left = "today" if r["days_left"] == 0 else f"in {r['days_left']} day{'s' if r['days_left'] > 1 else ''}"
+            msg = f"{r['name']} ({r['what']}) renews {left}, {r['renews_local']}: " + (KNOWN.get(r["name"]) or "use up its allowance before then and top up the card")
+        if msg and key not in sent:
+            link = "https://chatgpt.com/#settings/Account" if r["kind"] == "codex" else "https://claude.ai/settings/billing"
+            done = subprocess.run(["siso-az", "need", msg, "--by", "renewals", "--link", link, "--project", "Agent stack"],
+                                  capture_output=True, text=True)
+            if done.returncode:
+                print(f"renewals: siso-az need failed: {done.stderr.strip()[:200]}", file=sys.stderr)
+                continue  # not marked sent, so the next run tries again
+            sent[key] = dt.datetime.now().isoformat(timespec="seconds")
+            out.append(msg)
+    json.dump(sent, open(sent_path, "w"), indent=1)
+    for m in out:
+        print("warned:", m)
+    if not out:
+        print("renewals: nothing to warn about today")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="renewals", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", nargs="?", default="show", choices=["show", "warn"])
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    rows = survey()
+    if a.json:
+        print(json.dumps(rows, indent=1))
+    elif a.cmd == "warn":
+        show(rows)
+        warn(rows)
+    else:
+        show(rows)
+    if a.cmd == "warn":  # the daily job: warnings delivered are success; an unreadable login is shown, not a failed job
+        return 0
+    return 1 if any(r["status"] in ("past_due", "unpaid", "canceled", "unreadable") for r in rows) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

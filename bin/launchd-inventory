@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""launchd-inventory: every launch agent on this machine, what it runs, how often, whether it is healthy, and who owns it.
+
+Shaan, 3 Oct ~18:40: "the launch agent ... for the laptop, should be logged in the agent base so we know which ones we
+have. Because sometimes they get too unmanageable and we have to go through and clean them up and make them more
+efficient". Agent Base reads `launchd-inventory --json`; a person reads the table.
+
+  launchd-inventory [--json] [--all]     --all includes third-party agents (default: ours, i.e. not com.apple/vendor)
+
+Per job: label, plist, program, schedule (every N s / at HH:MM / keep-alive / on load / on file change), loaded, pid,
+last exit, runs per day (estimated from the schedule), log path, log size and age, owning repo (from the program path).
+Health: "failing" = loaded with a nonzero last exit; "missing program" = the program file does not exist; "not loaded".
+"""
+import argparse, glob, json, os, plistlib, re, subprocess, time
+
+HOME = os.path.expanduser("~")
+WS = os.path.join(HOME, "SISO_Workspace")
+DIRS = [os.path.join(HOME, "Library/LaunchAgents")]
+VENDOR = re.compile(r"^(com\.apple|com\.google|com\.microsoft|com\.adobe|us\.zoom|com\.docker|com\.dropbox|com\.spotify|org\.mozilla|com\.brave|com\.openai\.chat|com\.cloudflare|com\.tailscale|homebrew\.mxcl)")
+
+
+def loaded():
+    out = {}
+    for line in subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout.splitlines()[1:]:
+        pid, status, label = (line.split("\t") + ["", "", ""])[:3]
+        out[label] = {"pid": None if pid == "-" else int(pid), "last_exit": None if status == "-" else int(status)}
+    return out
+
+
+def schedule(p):
+    parts, per_day = [], 0.0
+    if p.get("StartInterval"):
+        s = int(p["StartInterval"])
+        parts.append(f"every {s // 3600}h" if s >= 3600 and s % 3600 == 0 else f"every {s // 60}m" if s >= 60 else f"every {s}s")
+        per_day += 86400 / max(s, 1)
+    cal = p.get("StartCalendarInterval")
+    if cal:
+        cal = cal if isinstance(cal, list) else [cal]
+        for c in cal:
+            if "Minute" in c and "Hour" not in c:
+                parts.append(f"hourly at :{c['Minute']:02d}")
+                per_day += 24
+            else:
+                parts.append(f"at {c.get('Hour', 0):02d}:{c.get('Minute', 0):02d}" + (f" weekday {c['Weekday']}" if "Weekday" in c else ""))
+                per_day += 1 / 7 if "Weekday" in c else 1
+    if p.get("KeepAlive"):
+        parts.append("keep-alive")
+    if p.get("WatchPaths") or p.get("QueueDirectories"):
+        parts.append("on file change")
+    if p.get("RunAtLoad"):
+        parts.append("on load")
+    return ", ".join(parts) or "manual", round(per_day, 1)
+
+
+def owner(prog):
+    if not prog.startswith(WS + "/"):
+        return prog.replace(HOME, "~").split("/")[1] if prog.startswith(HOME) else "system"
+    rel = prog[len(WS) + 1:].split("/")
+    for n in range(len(rel) - 1, 0, -1):  # the nearest enclosing git repo
+        d = os.path.join(WS, *rel[:n])
+        if os.path.exists(os.path.join(d, ".git")):
+            return "/".join(rel[:n])
+    return "/".join(rel[:2])
+
+
+def survey(include_all):
+    live = loaded()
+    rows = []
+    for d in DIRS:
+        for f in sorted(glob.glob(os.path.join(d, "*.plist"))):
+            try:
+                p = plistlib.load(open(f, "rb"))
+            except Exception as e:
+                rows.append({"label": os.path.basename(f)[:-6], "plist": f, "health": f"unreadable plist ({e.__class__.__name__})"})
+                continue
+            label = p.get("Label", os.path.basename(f)[:-6])
+            if not include_all and VENDOR.match(label):
+                continue
+            args = p.get("ProgramArguments") or ([p["Program"]] if p.get("Program") else [])
+            prog = p.get("Program") or (args[0] if args else "")
+            # an interpreter (bash -lc, python3, node) runs the real program: report that one
+            real = None
+            if re.search(r"(bash|sh|zsh|python3?(\.\d+)?|node|env)$", prog):  # find the first real path in the arguments, even inside a -c string
+                for a in args[1:]:
+                    m = re.search(r"((?:/Users/[^/\s]+|~)/[^\s'\";&|]+)", a)
+                    if m and os.path.exists(os.path.expanduser(m[1])):
+                        real = os.path.expanduser(m[1])
+                        break
+            real = real or prog
+            sched, per_day = schedule(p)
+            log = p.get("StandardOutPath") or p.get("StandardErrorPath") or ""
+            st = os.stat(log) if log and os.path.exists(log) else None
+            l = live.get(label)
+            exists = os.path.exists(real.split()[0]) if real else False
+            health = ("not loaded" if not l else "missing program" if not exists else
+                      "failing" if l["last_exit"] not in (None, 0) and not l["pid"] else "running" if l["pid"] else "ok")
+            rows.append({"label": label, "plist": f.replace(HOME, "~"), "program": real.replace(HOME, "~"), "args": " ".join(args[1:])[:200].replace(HOME, "~"),
+                         "schedule": sched, "runs_per_day": per_day, "loaded": bool(l), "pid": l and l["pid"],
+                         "last_exit": l and l["last_exit"], "health": health, "owner": owner(real),
+                         "log": log.replace(HOME, "~"), "log_mb": round(st.st_size / 1e6, 1) if st else None,
+                         "log_age_h": round((time.time() - st.st_mtime) / 3600, 1) if st else None})
+    return rows
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="launchd-inventory", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--all", action="store_true")
+    a = ap.parse_args()
+    rows = survey(a.all)
+    if a.json:
+        print(json.dumps({"machine": os.uname().nodename, "at": int(time.time()), "jobs": rows}, indent=1))
+        return 0
+    bad = [r for r in rows if r["health"] not in ("ok", "running")]
+    print(f"launchd-inventory: {len(rows)} launch agents, {sum(r['health'] == 'running' for r in rows)} running, {len(bad)} unhealthy, "
+          f"~{sum(r.get('runs_per_day') or 0 for r in rows):.0f} scheduled runs/day")
+    for r in sorted(rows, key=lambda r: (r["health"] in ("ok", "running"), r.get("owner") or "", r["label"])):
+        print(f"  {r['health']:15} {r['label']:42} {r.get('schedule', ''):28} {r.get('owner', '')[:40]:40} log {r.get('log_mb')}MB")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

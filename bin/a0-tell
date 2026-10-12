@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""a0-tell: give a Claude agent in herdr one line, typed only once its pane is idle.
+
+herdr-send can't reach Claude panes, and text typed into a busy pane arrives garbled (efficiency ledger,
+1 Oct 2026). This waits for the pane to go idle, types the line, presses Enter and checks that the agent
+started working. For anything longer than a line, write a file and send a pointer to it.
+
+  a0-tell <pane|NAME> "A0: read <file> and do it."       returns at once; the line is queued into its prompt now
+  a0-tell --sync <pane> "..."                             deliver in the foreground and confirm it started
+  a0-tell --when-idle <pane> "..."                        hold the line until the agent is idle (old default)
+
+NAME is the agent's tab name as herdr shows it (WIDGET-MAP, HALO-FACE); it must match exactly one pane, and is
+resolved before anything is queued, so --bg fails at once instead of logging 'pane gone' later (1 Oct 22:00:
+three --bg messages to agent names were dropped that way while the caller was told they would be delivered).
+It also waits while anything sits in the pane's input box, so it never types over Shaan.
+Exit codes: 0 delivered, 1 pane gone, 2 timed out waiting for idle, 3 typed but the agent did not start.
+Every attempt is logged to .agents/a0/tell.log.
+
+Long text (over 600 bytes) goes as a file: the whole message is written to .agents/a0/tell/<stamp>-<target>.md and
+the agent is sent one short line pointing at it. Typed in directly, Claude Code dropped the first 1,022 bytes of a
+1,408-byte handover and of a 1,224-byte brief on 2 Oct (15:26, 15:33; EFFICIENCY measured both from the sender's
+and receiver's session files). 200-600 bytes go in as one bracketed paste with Enter after it settles, the way
+Agent Base sends his dictation.
+"""
+import argparse, datetime as dt, json, os, re, subprocess, sys, time
+
+LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), ".agents", "a0", "tell.log")
+TELL_DIR = os.path.join(os.path.dirname(LOG), "tell")
+POINTER_OVER = 600   # bytes; typed text past ~1 KB loses its head
+PASTE_OVER = 200
+
+
+def panes():
+    return json.loads(subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True, timeout=15).stdout)["result"]["panes"]
+
+
+def status(pane):
+    try:
+        ps = panes()
+    except Exception:
+        return "unknown"
+    for p in ps:
+        if p["pane_id"] == pane:
+            st = p.get("agent_status") or "unknown"
+            # An Agent SDK seat (siso-host: Agent Zero and the app-chat agents) never reports a status, but it has a session
+            # and takes queued text at any time. Before 3 Oct every report to Agent Zero sat here until its 30 min ran out.
+            return "seat" if st == "unknown" and p.get("agent_session") else st
+    return "gone"
+
+
+def resolve(target):
+    """A pane id, or the pane whose tab name is exactly TARGET. Returns (pane_id, None) or (None, why)."""
+    try:
+        ps = panes()
+    except Exception as e:
+        return None, f"herdr pane list failed ({e})"
+    if any(p["pane_id"] == target for p in ps):
+        return target, None
+    if target.upper() in ("A0", "AGENT ZERO", "AGENT-ZERO"):  # Agent Zero is whoever holds the keep-alive seat (moves on every relay)
+        try:
+            seat = json.load(open(os.path.expanduser("~/.local/state/a0/seat.json")))["pane"]
+            if any(p["pane_id"] == seat for p in ps):
+                return seat, None
+        except Exception:
+            pass
+    hits =[p["pane_id"] for p in ps if (p.get("terminal_title_stripped") or "").strip() == target]
+    if not hits:  # herdr's own agent name (lower case, e.g. efficiency), which outlives a session title
+        try:
+            al = json.loads(subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=15).stdout)
+            hits = [a["pane_id"] for a in al["result"]["agents"] if (a.get("name") or "").lower() == target.lower()]
+        except Exception:
+            pass
+    if len(hits) == 1:
+        return hits[0], None
+    if hits:
+        return None, f"{len(hits)} panes are named {target} ({', '.join(hits)}); pass a pane id"
+    return None, f"no pane has the id or tab name {target!r} (herdr agent list shows the names)"
+
+
+def typed(pane):
+    """What someone has really typed into the pane's input box ('' if empty or unreadable). Read with styling:
+    Claude Code shows a suggested next prompt as dimmed ghost text in an empty box, and that is not typing.
+    On 1 Oct a line typed into a pane landed on the end of a message Shaan was dictating there and sent it."""
+    try:
+        raw = subprocess.run(["herdr", "pane", "read", pane, "--source", "recent", "--lines", "15", "--format", "ansi"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return ""
+    lines = [ln for ln in raw.splitlines() if "\u276f" in ln]
+    if not lines:
+        return ""
+    s = lines[-1].split("\u276f", 1)[1]
+    s = re.sub(r"\x1b\[2m.*?(?:\x1b\[(?:0|22)m|$)", "", s)
+    s = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", s)
+    return s.replace("\xa0", " ").strip()
+
+def as_pointer(target, text):
+    """Write a long message to a file and return the short line that points at it."""
+    os.makedirs(TELL_DIR, exist_ok=True)
+    f = os.path.join(TELL_DIR, dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", target) + ".md")
+    with open(f, "w") as fh:
+        fh.write(text + "\n")
+    head = re.match(r"(.{1,80}?):\s", text)
+    who = head.group(1) if head else "A0"
+    return f"{who}: a long message ({len(text)} chars). Read all of {f} first, then act on it."
+
+
+def type_line(pane, text, seat=False):
+    """Short text is typed; longer text goes in as one bracketed paste, with Enter once it has settled. An Agent SDK seat
+    (siso-host) reads raw keys and shows the paste markers as text ('[200~ ... [201~', 3 Oct), so a seat gets it typed."""
+    paste = len(text.encode()) > PASTE_OVER and not seat
+    if seat:  # typed plainly, every newline is an Enter: one message arrived as 16 (3 Oct, a queue notice with test output)
+        text = " ".join(text.split())
+    subprocess.run(["herdr", "pane", "send-text", pane, f"\x1b[200~{text}\x1b[201~" if paste else text], capture_output=True, timeout=15)
+    time.sleep(min(4.0, 0.3 + len(text) / 4000) if paste else 0.5)
+    subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=15)
+
+
+def compacting(pane):
+    """True while a self-compact waiter is armed for the pane. At 19:49 on 1 Oct a line typed here landed one
+    second before the waiter's /compact, so the compact was queued behind it; wait for the waiter to finish."""
+    lock = os.path.join(os.path.expanduser("~/.local/state/self-compact"), re.sub(r"[^A-Za-z0-9_-]", "_", pane) + ".lock")
+    try:
+        os.kill(json.load(open(lock))["pid"], 0)
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def log(pane, text, result):
+    with open(LOG, "a") as f:
+        f.write(json.dumps({"at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "pane": pane,
+                            "text": text[:200], "chars": len(text), "result": result}) + "\n")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="a0-tell", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("pane")
+    p.add_argument("text")
+    p.add_argument("--wait", type=int, default=1800)
+    p.add_argument("--bg", action="store_true", help="(default now; kept so old callers still work)")
+    p.add_argument("--sync", action="store_true", help="deliver in the foreground and report; the default returns at once")
+    p.add_argument("--queue", action="store_true", help="(default now; kept so old callers still work)")
+    p.add_argument("--when-idle", action="store_true",
+                   help="hold the line until the agent is idle instead of queueing it while it works (the old default)")
+    a = p.parse_args()
+    pane, why = resolve(a.pane)
+    if not pane:
+        log(a.pane, a.text, f"not sent: {why}")
+        print(f"a0-tell: not sent: {why}", file=sys.stderr)
+        return 1
+    a.target, a.pane = a.pane, pane
+    # 3 Oct ~16:15 (Shaan: an owner told a worker something and "the command said it's gonna take five minutes to send the
+    # message ... this is ridiculous"): the sender never waits. Claude queues a line typed while it works and takes it at
+    # its next step, so the line goes in now (still never over someone's typing or a compaction), and the delivery runs
+    # detached. --when-idle and --sync bring back the old holding behaviour for the rare case that needs it.
+    a.queue = not a.when_idle
+    try:  # an Agent SDK pane (siso-host, herdr agent "siso") never reports idle, so it always takes queued text
+        al = json.loads(subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=15).stdout)
+        a.queue = a.queue or any(x["pane_id"] == pane and x.get("agent") == "siso" for x in al["result"]["agents"])
+    except Exception:
+        pass
+    if not a.sync:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "--sync", "--wait", str(a.wait), *([] if a.queue else ["--when-idle"]), a.pane, a.text],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print(f"a0-tell: sent to {a.pane} ({'queued into its prompt now' if a.queue else 'once it is idle'}; log: {LOG})")
+        return 0
+    deadline = time.time() + a.wait
+    while True:
+        st = status(a.pane)
+        if st == "gone":
+            log(a.pane, a.text, "pane gone")
+            print(f"a0-tell: pane {a.pane} is gone", file=sys.stderr)
+            return 1
+        if (st in ("idle", "done", "seat") or (a.queue and st == "working")) and not typed(a.pane) and not compacting(a.pane):
+            break
+        if time.time() > deadline:
+            log(a.pane, a.text, "timed out waiting for idle and an empty input box")
+            print(f"a0-tell: {a.pane} stayed busy (or someone kept typing in it) for {a.wait}s; not sent", file=sys.stderr)
+            return 2
+        time.sleep(15)  # was 5: each poll spawns several herdr calls; 7 queued waiters = ~350 process starts/min (HEALTH, 3 Oct power pass)
+    if len(a.text.encode()) > POINTER_OVER:
+        full, a.text = a.text, as_pointer(a.target, a.text)
+        log(a.pane, full, "long: sent as a file pointer: " + a.text)
+    type_line(a.pane, a.text, seat=status(a.pane) == "seat")
+    for _ in range(10):
+        time.sleep(2)
+        if status(a.pane) in ("working", "seat"):
+            log(a.pane, a.text, "delivered")
+            print(f"a0-tell: delivered to {a.pane}; the agent is working on it")
+            return 0
+    log(a.pane, a.text, "typed, agent did not start")
+    print(f"a0-tell: typed into {a.pane}, but the agent did not start; read the pane", file=sys.stderr)
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

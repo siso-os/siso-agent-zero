@@ -1,0 +1,43 @@
+#!/bin/sh
+# soul: one of Agent Zero's own agents: a hosted Codex chat (Sol 6.1) filed under Agent Zero in the app, which he can open and
+# message. It gets BRIEF as its first turn; its final reply lands in OUT; a line goes to ~/.local/state/a0/souls/done.log.
+#   soul NAME BRIEF OUT [effort]      start it (returns at once)
+#   soul wait [NAME...]               until those (default: all started) have returned; prints their done lines
+#   soul stop NAME                    stop its chat and file it away (its Codex thread id is kept in souls/threads.txt)
+set -eu
+AB=${SOUL_HOST:-$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host}
+S=$HOME/.local/state/a0/souls; H=${AB_HOSTS_DIR:-$HOME/.local/state/agent-base/hosts}; mkdir -p "$S" "$H/_archive"
+case "${1:-}" in
+wait) shift; while :; do left=0; for f in "$S"/*.running; do [ -e "$f" ] || continue; n=$(basename "$f" .running); { [ $# = 0 ] || echo " $* " | grep -q " $n "; } && left=1; done; [ $left = 0 ] && break; sleep 30; done
+  if [ $# = 0 ]; then tail -20 "$S/done.log"; else for n in "$@"; do grep " $n " "$S/done.log" | tail -1; done; fi; exit 0;;
+stop) n=${2:?name}; p=$(pgrep -f "service-runner.ts --harness codex --name $n " | head -1 || true); [ -n "$p" ] && jobstop "$p" >/dev/null
+  [ -f "$H/name-$n.json" ] && { python3 -c "import json,sys;print(sys.argv[2], json.load(open(sys.argv[1]))['session'])" "$H/name-$n.json" "$n" >> "$S/threads.txt"; mv "$H/name-$n.json" "$H/_archive/"; }; echo "$n stopped"; exit 0;;
+esac
+workspace=; parent=${AB_HOST_NAME:-Agent Zero}
+while [ "${1:-}" = --workspace ] || [ "${1:-}" = --parent ]; do
+  case "$1" in --workspace) workspace=${2:?workspace};; --parent) parent=${2:?parent};; esac
+  shift 2
+done
+n=${1:?name}; brief=${2:?brief}; out=${3:?out}; effort=${4:-medium}
+[ -f "$H/name-$n.json" ] && kill -0 "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('pid',0))" "$H/name-$n.json")" 2>/dev/null \
+  && { echo "soul: $n is already a live chat (5 Oct: a brief went into an old chat of the same name); pick a new name or soul stop $n"; exit 3; }
+grep -q -- '"--lead"' "$AB/src/codex-host.ts" || { echo "soul: the live host has no --lead yet; refusing (it would land in the side nav)"; exit 3; }
+mkdir -p "$(dirname "$out")"
+# Every soul starts as an owner (Shaan, 5 Oct: "not a dumb fucking agent but like an owner"): souls/OWNER.md goes before its brief.
+first="$S/$n.first.md"; cat "$(dirname "$0")/../souls/OWNER.md" "$brief" > "$first"; brief="$first"
+python3 - "$n" "$workspace" "$parent" "$brief" "$out" <<'PYLEDGER'
+import datetime, fcntl, json, os, socket, sys
+from pathlib import Path
+p = Path(os.environ.get('A0_DISPATCH_FILE', str(Path.home() / '.local/state/a0/dispatch.jsonl')))
+p.parent.mkdir(parents=True, exist_ok=True)
+with p.open('a') as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    f.write(json.dumps(dict(at=datetime.datetime.now().isoformat(), kind='soul', name=sys.argv[1], workspace=sys.argv[2] or None,
+                           parent=sys.argv[3], machine='mini' if 'mini' in socket.gethostname().lower() else 'laptop', brief=sys.argv[4], out=sys.argv[5])) + '\n')
+    f.flush(); os.fsync(f.fileno())
+PYLEDGER
+( cd "$HOME" && HERDR_ENV=0 nohup node --experimental-strip-types --no-warnings "$AB/src/service-runner.ts" --harness codex --name "$n" --model gpt-6.1-sol --effort "$effort" --lead "$parent" > "$S/$n.host.log" 2>&1 & )
+touch "$S/$n.running"
+( sleep 20; rc=0; "$AB/bin/siso-host-service" send --name "$n" --prompt-file "$brief" --timeout 10800 > "$out" 2> "$S/$n.err" || rc=$?
+  echo "$(date +%H:%M) $n rc=$rc $out" >> "$S/done.log"; rm -f "$S/$n.running" ) >/dev/null 2>&1 &
+echo "$n started (under Agent Zero); reply -> $out"

@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# Keep the named Agent Zero seat alive in its recorded Herdr pane.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"  # launchd starts with a bare PATH; herdr and the claude launchers live here
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_DIR="${A0_KEEPALIVE_STATE_DIR:-$HOME/.local/state/a0}"
+SEAT_FILE="$STATE_DIR/seat.json"
+LOG_FILE="${A0_KEEPALIVE_LOG:-$STATE_DIR/keepalive.log}"
+INBOX="${A0_KEEPALIVE_INBOX:-$ROOT/.agents/a0/inbox.log}"
+HERDR="${A0_KEEPALIVE_HERDR:-herdr}"
+SENDER="${A0_KEEPALIVE_SENDER:-}"
+NOTIFIER="${A0_KEEPALIVE_NOTIFIER:-osascript}"
+HOSTS_DIR="${A0_KEEPALIVE_HOSTS_DIR:-$HOME/.local/state/agent-base/hosts}"  # siso-host writes <pane>.json {pid, session, pane}
+PAUSE_FILE="$STATE_DIR/keepalive.pause"
+LOCK_DIR="$STATE_DIR/keepalive.lock"
+
+mkdir -p "$STATE_DIR"
+usage() {
+  cat <<'EOF'
+Usage:
+  a0-keepalive set --session ID --launcher NAME [--pane ID] [--seat-file PATH]
+  a0-keepalive check [--seat-file PATH]
+  a0-keepalive status [--seat-file PATH]
+  a0-keepalive pause [--minutes N]
+  a0-keepalive resume
+  a0-keepalive install
+EOF
+}
+die() { echo "a0-keepalive: $*" >&2; exit 2; }
+json_get() { /usr/bin/python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v.get(sys.argv[2], "") or "")' "$1" "$2"; }
+atomic_seat() {
+  local session="$1" launcher="$2" pane="$3" tmp
+  mkdir -p "$(dirname "$SEAT_FILE")"
+  tmp="$(mktemp "$(dirname "$SEAT_FILE")/.seat.XXXXXX")"
+  /usr/bin/python3 - "$tmp" "$session" "$launcher" "$pane" <<'PY'
+import json,sys,datetime
+path,session,launcher,pane=sys.argv[1:]
+with open(path,"w") as f:
+    json.dump({"session":session,"login_launcher":launcher,"pane":pane,"name":"A0","updated":datetime.datetime.now(datetime.timezone.utc).isoformat()},f)
+    f.write("\n")
+PY
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$SEAT_FILE"
+}
+load_seat() {
+  [[ -f "$SEAT_FILE" ]] || die "seat file not found: $SEAT_FILE"
+  SESSION="$(json_get "$SEAT_FILE" session)"
+  LAUNCHER="$(json_get "$SEAT_FILE" login_launcher)"
+  PANE="$(json_get "$SEAT_FILE" pane)"
+  [[ -n "$SESSION" && -n "$LAUNCHER" ]] || die "seat needs session and login_launcher"
+}
+pane_list() { "$HERDR" pane list; }
+pane_json() {
+  local output
+  output="$(pane_list)" || die "could not read Herdr panes"
+  /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("result",d); print(json.dumps(r.get("panes",[])))' <<<"$output"
+}
+pane_record() {
+  local pane="$1"
+  pane_json | /usr/bin/python3 -c 'import json,sys; p=sys.argv[1]; a=json.load(sys.stdin); x=next((x for x in a if x.get("pane_id")==p),None); print(json.dumps(x) if x else "")' "$pane"
+}
+is_alive() {
+  local record="$1"
+  /usr/bin/python3 - "$record" "$SESSION" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1]); s=p.get("agent_session") or {}
+# Under the Agent SDK host (a0-sdk) herdr shows the pane as agent "siso"; its session id may not be reported.
+ok = (p.get("agent")=="claude" and s.get("value")==sys.argv[2]) or (p.get("agent")=="siso" and s.get("value") in (None, sys.argv[2]))
+raise SystemExit(0 if ok else 1)
+PY
+}
+# An SDK seat is alive while its siso-host process is: its own state file names the pane, the session and its pid. herdr's agent
+# detection is not asked first (3 Oct 00:51: herdr stopped calling A0's live pane "siso" and the keep-alive typed a relaunch
+# into A0's input box).
+host_alive() {
+  /usr/bin/python3 - "$HOSTS_DIR" "$PANE" "$SESSION" <<'PY'
+import glob,json,os,sys
+d,pane,session=sys.argv[1:]
+for f in glob.glob(os.path.join(d,"*.json")):
+    try: h=json.load(open(f)); pid=int(h.get("pid") or 0)
+    except Exception: continue
+    if pid<=0 or not (h.get("pane")==pane or (session and h.get("session")==session)): continue
+    try: os.kill(pid,0)
+    except ProcessLookupError: continue
+    except PermissionError: pass
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+# Never type into a pane that is running a program: only a bare shell prompt takes a relaunch. Unreadable = busy (fail safe).
+pane_program() {
+  "$HERDR" pane process-info --pane "$1" 2>/dev/null | /usr/bin/python3 -c '
+import json,os,sys
+try: fg=json.load(sys.stdin)["result"]["process_info"].get("foreground_processes") or []
+except Exception: print("unreadable"); raise SystemExit(0)
+names=[os.path.basename((p.get("argv") or [p.get("name") or ""])[0]).lstrip("-") for p in fg]
+busy=[n for n in names if n and n not in ("zsh","bash","sh","fish","login")]
+print(busy[0] if busy else "")'
+}
+send_resume() {
+  local pane="$1" command
+  command="$LAUNCHER --resume $SESSION -n A0"
+  if [[ -n "$SENDER" ]]; then "$SENDER" "$pane" "$command"; else "$HERDR" pane run "$pane" "$command"; fi
+}
+verify_resume() {
+  local pane="$1" attempts=30 record
+  if [[ "${A0_KEEPALIVE_TEST_ASSUME_RESUMED:-0}" == 1 ]]; then return 0; fi
+  while (( attempts > 0 )); do
+    record="$(pane_record "$pane")"
+    if [[ -n "$record" ]] && is_alive "$record"; then return 0; fi
+    sleep 2
+    ((attempts-=1))
+  done
+  return 1
+}
+log_relaunch() {
+  local why="$1" pane="$2" now
+  now="$(date '+%H:%M')"
+  mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$INBOX")"
+  printf '%s %s A0-KEEPALIVE: relaunched A0 (%s) in %s, session %s\n' "$(date '+%F')" "$now" "$why" "$pane" "${SESSION:0:8}" >> "$LOG_FILE"
+  printf '%s A0-KEEPALIVE: relaunched A0 (%s) in %s, session %s\n' "$now" "$why" "$pane" "${SESSION:0:8}" >> "$INBOX"
+}
+notify_giveup() {
+  local why="$1" line="A0 keepalive: gave up after 3 relaunches; $1"
+  mkdir -p "$(dirname "$INBOX")"
+  printf '%s\n' "$line" >> "$INBOX"
+  "$NOTIFIER" -e "display notification \"$line\" with title \"A0 keepalive\"" >/dev/null 2>&1 || true
+}
+recent_relaunches() {
+  local now="$1"
+  /usr/bin/python3 - "$STATE_DIR/relaunches" "$now" <<'PY'
+import sys
+path,now=sys.argv[1],int(sys.argv[2])
+try: rows=[int(x) for x in open(path) if x.strip()]
+except FileNotFoundError: rows=[]
+rows=[x for x in rows if now-x < 600]
+open(path,"w").write("".join(f"{x}\n" for x in rows))
+print(len(rows))
+PY
+}
+record_attempt() {
+  date +%s >> "$STATE_DIR/relaunches"
+}
+choose_launcher() {
+  local candidate_dir candidate_file newest=0 newest_launcher="$LAUNCHER" file mtime launcher
+  local dirs=("$HOME"/.claude* "$HOME"/.config/claude-*)
+  [[ "$LAUNCHER" == *a0-sdk ]] && { printf '%s\n' "$LAUNCHER"; return 0; }  # the SDK launcher picks its own login
+  for candidate_dir in "${dirs[@]}"; do
+    [[ -d "$candidate_dir" ]] || continue
+    if [[ "$candidate_dir" == "$HOME"/.config/claude-* ]]; then
+      launcher="claude-${candidate_dir##*/claude-}"
+    else
+      launcher="claude${candidate_dir##*/.claude}"
+      [[ "$candidate_dir" == "$HOME/.claude" ]] && launcher=claude
+    fi
+    while IFS= read -r -d '' file; do
+      mtime="$(stat -f %m "$file" 2>/dev/null || echo 0)"
+      if (( mtime > newest )); then newest="$mtime"; newest_launcher="$launcher"; fi
+    done < <(find "$candidate_dir" -type f -name "$SESSION.jsonl" -print0 2>/dev/null)
+  done
+  printf '%s\n' "$newest_launcher"
+}
+check() {
+  load_seat
+  if [[ -e "$PAUSE_FILE" ]]; then
+    local until_epoch
+    read -r until_epoch < "$PAUSE_FILE" || until_epoch=0
+    if [[ ! "$until_epoch" =~ ^[0-9]+$ ]]; then return 0; fi
+    if (( until_epoch > $(date +%s) )); then return 0; fi
+    rm -f "$PAUSE_FILE"
+  fi
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    local owner lock_age lock_mtime
+    owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then return 0; fi
+    lock_mtime="$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)"
+    lock_age=$(( $(date +%s) - lock_mtime ))
+    (( lock_age >= 60 )) || return 0
+    rm -rf "$LOCK_DIR" 2>/dev/null || return 0
+    mkdir "$LOCK_DIR" 2>/dev/null || return 0
+  fi
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  trap 'rm -f "$LOCK_DIR/pid"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+  local record why count pane_id workspace created selected busy
+  if host_alive; then rm -f "$STATE_DIR/no-claude-count"; return 0; fi
+  record="$(pane_record "$PANE")"
+  if [[ -n "$record" ]] && is_alive "$record"; then rm -f "$STATE_DIR/no-claude-count"; return 0; fi
+  if [[ -n "$record" ]]; then
+    count=0; [[ -f "$STATE_DIR/no-claude-count" ]] && read -r count < "$STATE_DIR/no-claude-count"
+    count=$((count+1)); printf '%s\n' "$count" > "$STATE_DIR/no-claude-count"
+    (( count < 2 )) && return 0
+    why="pane has no Claude for 2 checks"
+    pane_id="$PANE"
+    busy="$(pane_program "$PANE")"
+    if [[ -n "$busy" ]]; then
+      printf '%s A0-KEEPALIVE: not typing into %s: it is running %s\n' "$(date '+%H:%M')" "$PANE" "$busy" >> "$LOG_FILE"
+      rm -f "$STATE_DIR/no-claude-count"
+      return 0
+    fi
+  else
+    why="recorded pane disappeared"
+    count="$(recent_relaunches "$(date +%s)")"
+    if (( count >= 3 )); then
+      [[ -e "$STATE_DIR/gave-up" ]] && return 0
+      notify_giveup "$why"
+      : > "$STATE_DIR/gave-up"
+      return 0
+    fi
+    workspace="$(/usr/bin/python3 - "$SEAT_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])).get("pane","")
+print(p.split(":",1)[0] if ":" in p else "")
+PY
+)"
+    [[ -n "$workspace" ]] || die "cannot derive workspace from pane $PANE"
+    created="$("$HERDR" tab create --workspace "$workspace" --cwd "$ROOT" --label A0)" || die "could not create A0 tab"
+    pane_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' <<<"$created")"
+    atomic_seat "$SESSION" "$LAUNCHER" "$pane_id"
+    PANE="$pane_id"
+  fi
+  if [[ -n "$record" ]]; then
+    count="$(recent_relaunches "$(date +%s)")"
+    if (( count >= 3 )); then
+      [[ -e "$STATE_DIR/gave-up" ]] && return 0
+      notify_giveup "$why"
+      : > "$STATE_DIR/gave-up"
+      return 0
+    fi
+  fi
+  selected="$(choose_launcher)"
+  if [[ -n "$selected" && "$selected" != "$LAUNCHER" ]]; then
+    LAUNCHER="$selected"
+    atomic_seat "$SESSION" "$LAUNCHER" "$PANE"
+  fi
+  record_attempt
+  send_resume "$pane_id" || { rm -f "$STATE_DIR/no-claude-count"; return 1; }
+  if verify_resume "$pane_id"; then
+    rm -f "$STATE_DIR/no-claude-count"
+    log_relaunch "$why" "$pane_id"
+  else
+    printf '%s A0-KEEPALIVE: relaunch verification timed out in %s, session %s\n' "$(date '+%H:%M')" "$pane_id" "${SESSION:0:8}" >> "$LOG_FILE"
+    return 1
+  fi
+}
+status() {
+  load_seat
+  local record alive last
+  record="$(pane_record "$PANE")"
+  alive=dead
+  if host_alive || { [[ -n "$record" ]] && is_alive "$record"; }; then alive=alive; fi
+  last="$(grep 'A0-KEEPALIVE: relaunched A0' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)"
+  printf 'A0 %s\npane: %s\nsession: %s\nlogin: %s\nlast relaunch: %s\n' "$alive" "$PANE" "$SESSION" "$LAUNCHER" "${last:-never}"
+}
+install_job() {
+  local plist="$HOME/Library/LaunchAgents/com.siso.a0-keepalive.plist"
+  mkdir -p "$(dirname "$plist")" "$STATE_DIR"
+  /usr/bin/python3 - "$plist" "$ROOT/bin-az/a0-keepalive" "$LOG_FILE" <<'PY'
+import plistlib,sys
+path,script,log=sys.argv[1:]
+data={"Label":"com.siso.a0-keepalive","ProgramArguments":[script,"check"],"StartInterval":20,"StandardOutPath":log,"StandardErrorPath":log,"RunAtLoad":False}
+with open(path,"wb") as f: plistlib.dump(data,f,fmt=plistlib.FMT_XML)
+PY
+  echo "$plist"
+}
+parse_seat_arg() {
+  while (($#)); do
+    case "$1" in
+      --seat-file) (($# >= 2)) || die "--seat-file needs a path"; SEAT_FILE="$2"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+}
+command_name="${1:-}"; shift || true
+case "$command_name" in
+  set)
+    session= launcher= pane=""
+    while (($#)); do case "$1" in
+      --session) session="${2:?}"; shift 2;; --launcher) launcher="${2:?}"; shift 2;; --pane) pane="${2:?}"; shift 2;; --seat-file) SEAT_FILE="${2:?}"; shift 2;; *) die "unknown option: $1";; esac; done
+    [[ -n "$session" && -n "$launcher" ]] || die "set requires --session and --launcher"
+    atomic_seat "$session" "$launcher" "$pane"
+    ;;
+  check) parse_seat_arg "$@"; check ;;
+  status) parse_seat_arg "$@"; status ;;
+  pause)
+    minutes=60; (($# == 0)) || { [[ "$1" == --minutes && $# == 2 ]] || die "use --minutes N"; minutes="$2"; }
+    [[ "$minutes" =~ ^[1-9][0-9]*$ ]] || die "minutes must be a positive integer"
+    mkdir -p "$STATE_DIR"; /usr/bin/python3 - "$PAUSE_FILE" "$minutes" <<'PY'
+import sys,time
+open(sys.argv[1],"w").write(str(int(time.time())+int(sys.argv[2])*60)+"\n")
+PY
+    echo "paused for $minutes minutes"
+    ;;
+  resume) rm -f "$PAUSE_FILE" "$STATE_DIR/no-claude-count" "$STATE_DIR/gave-up" "$STATE_DIR/relaunches"; echo "resumed" ;;
+  install) install_job ;;
+  *) usage >&2; exit 2 ;;
+esac

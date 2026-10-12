@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""siso-az: start, resume and keep track of Agent Zero.
+
+Shaan, 1 Oct 2026: "I want a more persistent version of Agent Zero ... track every single Agent Zero new chat that
+was made, what was accomplished, running tasks, tasks that are being worked on, tasks that we've kept note of that
+need to be worked on, so that at any point I can just spawn up my Agent Zero ... if I feel like I have multiple
+bandwidth, I can open up multiple agent zeros. And they're aware of the ecosystem". He named it: "make command siso-az".
+
+  siso-az                     start a new Agent Zero here (Claude Opus 5.5, max effort, the claude-siso-3 bucket)
+  siso-az --tab               the same, in a new herdr tab of workspace A0
+  siso-az resume [ID|last]    resume an earlier Agent Zero chat
+  siso-az ls [-n N]           every Agent Zero chat: when, live or ended, what it did
+  siso-az state               the boot digest: goals, live heads, tasks, live agents, inbox, handoff
+  siso-az log "TEXT"          record what this chat accomplished (uses $A0_SESSION_ID)
+  siso-az end ["SUMMARY"]     mark this chat ended
+  siso-az task add "TITLE" [--project P] [--owner O] [--status S] [--note N] [--link URL]
+  siso-az task set ID [--status S] [--owner O] [--note N] [--link URL] [--title T]
+  siso-az task ls [--status S] [--project P] [--all]
+  siso-az need "WHAT SHAAN SHOULD DO" [--by NAME] [--link URL] [--project P]
+                              ask Shaan for something: top of his dashboard plus a laptop notification
+
+Task fields --now (plain-English current step), --progress ("2 of 5", or "pool:r1" for live image counts)
+and --eta put a task on the dashboard's "Where things stand" rows.
+
+Statuses: running (an agent is on it now), in_progress, backlog, blocked, needs-shaan, done.
+Records live in .agents/a0/ of this repo (private, tracked); the agents' report inbox is .agents/a0/inbox.log.
+"""
+import argparse, datetime as dt, fcntl, json, os, re, shutil, socket, subprocess, sys, uuid
+
+HOME_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # this repo: data in .agents/a0/, tasks in tasks/
+BOOT_DIR = os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")  # where Agent Zero runs (4 Oct)
+A0 = os.path.join(HOME_DIR, ".agents", "a0")
+SESSIONS = os.path.join(A0, "sessions.jsonl")
+LOG = os.path.join(A0, "log.jsonl")
+TASKS = os.path.join(A0, "tasks.json")
+GOALS = os.path.join(A0, "GOALS.md")
+HANDOFF = os.path.join(A0, "HANDOFF.md")
+INBOX = os.path.join(A0, "inbox.log")
+LEDGER = os.path.expanduser("~/SISO_Workspace/SISO_Agents/siso-harness-lab/.agents/efficiency/LEDGER.jsonl")
+STATUSES = ["running", "in_progress", "needs-shaan", "blocked", "backlog", "done"]
+LAUNCHER = os.path.expanduser("~/.local/bin/claude-siso-3")
+MODEL, EFFORT = "claude-opus-5-5", "max"
+
+
+def now():
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def die(msg, code=2):
+    print(f"siso-az: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def append(path, row):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def rows(path):
+    if not os.path.exists(path):
+        return []
+    out = []
+    for line in open(path):
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    except OSError:
+        return True
+    return "claude" in cmd
+
+
+def sessions():
+    """Fold sessions.jsonl events into one record per chat, newest first."""
+    by = {}
+    for r in rows(SESSIONS):
+        s = by.setdefault(r["id"], {"id": r["id"]})
+        if r.get("event") == "start":
+            s.pop("ended", None)
+        s.update({k: v for k, v in r.items() if k != "event"})
+        if r.get("event") == "end":
+            s["ended"] = r.get("at")
+    last = {}
+    for r in rows(LOG):
+        last[r.get("session")] = r
+    for s in by.values():
+        s["live"] = not s.get("ended") and alive(s.get("pid"))
+        if s["id"] in last:
+            s["last"] = last[s["id"]]["text"]
+    return sorted(by.values(), key=lambda s: s.get("started", ""), reverse=True)
+
+
+class Tasks:
+    """tasks.json under an exclusive lock, so several Agent Zeros can write at once."""
+
+    def __enter__(self):
+        os.makedirs(A0, exist_ok=True)
+        self.f = open(TASKS + ".lock", "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        self.data = json.load(open(TASKS)) if os.path.exists(TASKS) else {"next": 1, "tasks": []}
+        return self.data
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+DASH_URL = "http://127.0.0.1:5401/"  # Agent Base (the old 8892 dashboard is retired)
+
+
+def notify_need(t):
+    """A task just started needing Shaan: pop a laptop notification that opens his dashboard (click) and
+    log it to the inbox. Shaan, 1 Oct: "make a url for something that if it needs me as priority and goes
+    there and like maybe make a notification on my laptop"."""
+    title = "Agent Zero: you're needed"
+    msg = t["title"][:180]
+    tn = "/opt/homebrew/bin/terminal-notifier"
+    try:
+        if os.path.exists(tn):
+            subprocess.run([tn, "-title", title, "-message", msg, "-open", DASH_URL, "-sound", "Glass", "-group", f"a0-{t['id']}"],
+                           capture_output=True, timeout=10)
+        else:
+            subprocess.run(["osascript", "-e", f'display notification "{msg.replace(chr(34), chr(39))}" with title "{title}" sound name "Glass"'],
+                           capture_output=True, timeout=10)
+    except Exception:
+        pass
+    with open(INBOX, "a") as f:
+        f.write(f"{dt.datetime.now().strftime('%H:%M')} {t.get('owner') or 'A0'}: NEEDS SHAAN ({t['id']}): {t['title']}\n")
+
+
+def boot_prompt(short):
+    # 4 Oct 2026: Agent Zero boots from its fresh repo (siso-agent-zero): a short map, then the machine check. No inbox monitors,
+    # no atlas skills, no claiming (one Agent Zero, state in files; PRINCIPLES.md there says why).
+    return (
+        f"You are Agent Zero (chat {short}), Shaan's one agent. Read AGENTS.md here, the top entry of .agents/HANDOFF.md, "
+        "then run `look` (the whole status in one call). Then tell Shaan, in the adhd-agent-output shape, where things stand and "
+        "what you will do next."
+    )
+
+
+def cmd_new(a):
+    sid = str(uuid.uuid4())
+    short = sid[:8]
+    if a.tab:
+        if not shutil.which("herdr"):
+            die("--tab needs herdr on PATH")
+        ws = None
+        try:
+            lst = json.loads(subprocess.run(["herdr", "workspace", "list"], capture_output=True, text=True).stdout)
+            ws = next((w["workspace_id"] for w in lst["result"]["workspaces"] if w.get("label") == "A0"), None)
+        except Exception:
+            pass
+        if ws:
+            out = subprocess.run(["herdr", "tab", "create", "--workspace", ws, "--cwd", BOOT_DIR, "--label", f"A0 {short}"],
+                                 capture_output=True, text=True).stdout
+        else:
+            out = subprocess.run(["herdr", "workspace", "create", "--label", "A0", "--cwd", BOOT_DIR, "--no-focus"],
+                                 capture_output=True, text=True).stdout
+        try:
+            pane = json.loads(out)["result"]["root_pane"]["pane_id"]
+        except Exception:
+            die(f"could not create a herdr tab: {out.strip()[:200]}")
+        flags = f"--model {a.model} --effort {a.effort}"
+        subprocess.run(["herdr", "pane", "run", pane, f"siso-az --here --id {sid} {flags}"], check=False)
+        print(f"Agent Zero {short} starting in herdr pane {pane} (workspace A0).")
+        print("First run in this folder may stop on the trust and imports prompts: answer down + enter, twice.")
+        return
+    sid = a.id or sid
+    short = sid[:8]
+    append(SESSIONS, {"event": "start", "id": sid, "started": now(), "at": now(), "pid": os.getpid(),
+                      "host": socket.gethostname(), "cwd": BOOT_DIR, "model": a.model, "effort": a.effort,
+                      "pane": os.environ.get("HERDR_PANE_ID"), "kind": "new"})
+    # FM_ALLOW_SUBAGENT: firstmate's guard (bin/fm-subagent-pretool-check.sh) otherwise denies Monitor and Agent here;
+    # Agent Zero dispatches through herdr and siso-az tasks, and its boot prompt arms Monitors on the inbox and load.
+    env = dict(os.environ, SISO_A0="1", A0_SESSION_ID=sid, FM_ALLOW_SUBAGENT="1")
+    env.pop("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", None)
+    os.chdir(BOOT_DIR)
+    argv = [LAUNCHER, "--session-id", sid, "--model", a.model, "--effort", a.effort,
+            "--dangerously-skip-permissions", "-n", f"A0 {short}", boot_prompt(short)]
+    os.execve(LAUNCHER, argv, env)
+
+
+def cmd_resume(a):
+    ss = sessions()
+    if not ss:
+        die("no Agent Zero chats recorded yet; start one with: siso-az")
+    target = a.id or "last"
+    if target == "last":
+        s = ss[0]
+    else:
+        m = [s for s in ss if s["id"].startswith(target)]
+        if len(m) != 1:
+            die(f"'{target}' matches {len(m)} chats; give more of the id (siso-az ls)")
+        s = m[0]
+    if s.get("live"):
+        die(f"chat {s['id'][:8]} is still live (pid {s.get('pid')}); talk to it there, or start a new one")
+    append(SESSIONS, {"event": "start", "id": s["id"], "at": now(), "pid": os.getpid(),
+                      "pane": os.environ.get("HERDR_PANE_ID"), "kind": "resume"})
+    env = dict(os.environ, SISO_A0="1", A0_SESSION_ID=s["id"], FM_ALLOW_SUBAGENT="1")
+    env.pop("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", None)
+    os.chdir(s.get("cwd") or HOME_DIR)  # a chat resumes where it was started
+    os.execve(LAUNCHER, [LAUNCHER, "--resume", s["id"], "--model", a.model, "--effort", a.effort,
+                         "--dangerously-skip-permissions"], env)
+
+
+def cmd_ls(a):
+    ss = sessions()[: a.n]
+    if not ss:
+        print("No Agent Zero chats recorded yet. Start one with: siso-az")
+        return
+    for s in ss:
+        state = "LIVE " if s.get("live") else "ended"
+        when = (s.get("started") or "")[:16].replace("T", " ")
+        print(f"{s['id'][:8]}  {state}  {when}  pane={s.get('pane') or '-'}  {(s.get('last') or s.get('summary') or '')[:90]}")
+
+
+def section(title):
+    print(f"\n== {title} " + "=" * max(0, 70 - len(title)))
+
+
+def cmd_state(a):
+    print(f"Agent Zero state, {now()}  (records: {A0})")
+    print("Shaan's live dashboard: http://127.0.0.1:8892/")
+    section("Goals and priorities (his words)")
+    print(open(GOALS).read().strip() if os.path.exists(GOALS) else "GOALS.md missing: write his priorities there.")
+    section("Agent Zero chats")
+    live = [s for s in sessions() if s.get("live")]
+    me = os.environ.get("A0_SESSION_ID")
+    for s in live:
+        tag = " (this chat)" if s["id"] == me else ""
+        print(f"LIVE {s['id'][:8]}{tag}  pane={s.get('pane') or '-'}  started {(s.get('started') or '')[11:16]}  {(s.get('last') or '')[:80]}")
+    print(f"{len(live)} live; history: siso-az ls")
+    section("Tasks")
+    data = json.load(open(TASKS)) if os.path.exists(TASKS) else {"tasks": []}
+    for st in STATUSES[:-1]:
+        ts = [t for t in data["tasks"] if t.get("status") == st]
+        if ts:
+            print(f"[{st}]")
+            for t in ts:
+                who = f" ({t['owner']})" if t.get("owner") else ""
+                print(f"  {t['id']} {t.get('project', '-')}: {t['title']}{who}")
+    done = [t for t in data["tasks"] if t.get("status") == "done"]
+    print(f"done: {len(done)} (siso-az task ls --status done)")
+    section("Live agents (herdr)")
+    if shutil.which("herdr"):
+        try:
+            panes = json.loads(subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True, timeout=15).stdout)["result"]["panes"]
+            wss = {w["workspace_id"]: w.get("label") for w in json.loads(subprocess.run(
+                ["herdr", "workspace", "list"], capture_output=True, text=True, timeout=15).stdout)["result"]["workspaces"]}
+            for p in panes:
+                if p.get("agent"):
+                    title = (p.get("terminal_title") or "").strip()[:60]
+                    print(f"  {wss.get(p.get('workspace_id'), '?')}/{p['pane_id']} {p.get('agent')} {p.get('agent_status')} {title}")
+        except Exception as e:
+            print(f"  herdr not readable: {e}")
+    else:
+        print("  herdr not on PATH")
+    section("Inbox (agents' reports, newest last)")
+    if os.path.exists(INBOX):
+        for line in open(INBOX).read().splitlines()[-12:]:
+            print("  " + line[:220])
+    section("Latest handoff")
+    if os.path.exists(HANDOFF):
+        print("\n".join(open(HANDOFF).read().splitlines()[:60]))
+    section("Self-improve ledger")
+    open_rows = [r for r in rows(LEDGER) if r.get("status") not in ("closed",)]
+    print(f"{len(open_rows)} open rows in {LEDGER}")
+
+
+def cmd_log(a):
+    sid = a.session or os.environ.get("A0_SESSION_ID")
+    if not sid:
+        die("no chat id: run inside a siso-az chat (A0_SESSION_ID) or pass --session ID")
+    append(LOG, {"at": now(), "session": sid, "text": a.text})
+    print(f"logged for {sid[:8]}")
+
+
+def cmd_end(a):
+    sid = a.session or os.environ.get("A0_SESSION_ID")
+    if not sid:
+        die("no chat id: run inside a siso-az chat (A0_SESSION_ID) or pass --session ID")
+    append(SESSIONS, {"event": "end", "id": sid, "at": now(), "summary": a.summary or ""})
+    print(f"ended {sid[:8]}")
+
+
+def cmd_task(a):
+    if a.action == "ls":
+        data = json.load(open(TASKS)) if os.path.exists(TASKS) else {"tasks": []}
+        for t in data["tasks"]:
+            if a.status and t.get("status") != a.status:
+                continue
+            if a.project and t.get("project") != a.project:
+                continue
+            if not a.all and not a.status and t.get("status") == "done":
+                continue
+            extra = " | ".join(x for x in [t.get("owner"), t.get("note"), t.get("link")] if x)
+            print(f"{t['id']} [{t['status']}] {t.get('project', '-')}: {t['title']}" + (f"  — {extra}" if extra else ""))
+        return
+    with Tasks() as data:
+        if a.action == "add":
+            if not a.title:
+                die('task add needs a title: siso-az task add "TITLE"')
+            st = a.status or "backlog"
+            if st not in STATUSES:
+                die(f"status must be one of {', '.join(STATUSES)}")
+            t = {"id": f"T-{data['next']:04d}", "title": a.title, "project": a.project or "-", "status": st,
+                 "owner": a.owner, "note": a.note, "link": a.link, "created": now(), "updated": now(),
+                 "by": (os.environ.get("A0_SESSION_ID") or "")[:8] or None}
+            for k in ("now", "progress", "eta"):
+                if getattr(a, k):
+                    t[k] = getattr(a, k)
+            if a.due:
+                t["due"] = due_iso(a.due)
+            data["next"] += 1
+            data["tasks"].append(t)
+            self_save(data)
+            print(t["id"])
+            if st == "needs-shaan":
+                notify_need(t)
+        elif a.action == "set":
+            m = [t for t in data["tasks"] if t["id"] == a.title]
+            if not m:
+                die(f"no task {a.title} (siso-az task ls --all)")
+            t = m[0]
+            was = t.get("status")
+            if a.status:
+                if a.status not in STATUSES:
+                    die(f"status must be one of {', '.join(STATUSES)}")
+                t["status"] = a.status
+            for k in ("owner", "note", "link", "project", "now", "progress", "eta"):
+                v = getattr(a, k)
+                if v is not None:
+                    t[k] = v
+            if a.due is not None:
+                t["due"] = due_iso(a.due)
+                if not t["due"]:
+                    t.pop("due")
+            if a.new_title:
+                t["title"] = a.new_title
+            t["updated"] = now()
+            self_save(data)
+            print(f"{t['id']} [{t['status']}] {t['title']}")
+            if t["status"] == "needs-shaan" and was != "needs-shaan":
+                notify_need(t)
+
+
+def due_iso(s):
+    """--due: "HH:MM" today (local), or a full ISO time; "" clears it. A due ask goes to the top of the dashboard."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}", s):
+        h, m = map(int, s.split(":"))
+        return dt.datetime.now().astimezone().replace(hour=h, minute=m, second=0, microsecond=0).isoformat(timespec="seconds")
+    return dt.datetime.fromisoformat(s).astimezone().isoformat(timespec="seconds")
+
+
+def cmd_need(a):
+    """Ask Shaan for something: a needs-shaan task (top of his dashboard) plus a laptop notification."""
+    with Tasks() as data:
+        t = {"id": f"T-{data['next']:04d}", "title": a.what, "project": a.project or "-", "status": "needs-shaan",
+             "owner": a.by, "note": f"asked {dt.datetime.now().strftime('%H:%M')}" + (f" by {a.by}" if a.by else ""),
+             "link": a.link, "created": now(), "updated": now(), "by": (os.environ.get("A0_SESSION_ID") or "")[:8] or None}
+        if a.due:
+            t["due"] = due_iso(a.due)
+        data["next"] += 1
+        data["tasks"].append(t)
+        self_save(data)
+    notify_need(t)
+    print(f"{t['id']}: on Shaan's dashboard ({DASH_URL}) and sent to his laptop as a notification")
+
+
+def self_save(data):
+    tmp = TASKS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, TASKS)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="siso-az", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd")
+    for name in ("new",):
+        s = sub.add_parser(name)
+        s.add_argument("--tab", action="store_true")
+        s.add_argument("--here", action="store_true")
+        s.add_argument("--id")
+        s.add_argument("--model", default=MODEL)
+        s.add_argument("--effort", default=EFFORT)
+    s = sub.add_parser("resume"); s.add_argument("id", nargs="?"); s.add_argument("--model", default=MODEL); s.add_argument("--effort", default=EFFORT)
+    s = sub.add_parser("ls"); s.add_argument("-n", type=int, default=20)
+    sub.add_parser("state")
+    s = sub.add_parser("log"); s.add_argument("text"); s.add_argument("--session")
+    s = sub.add_parser("end"); s.add_argument("summary", nargs="?"); s.add_argument("--session")
+    s = sub.add_parser("task")
+    s.add_argument("action", choices=["add", "set", "ls"])
+    s.add_argument("title", nargs="?", help="title for add; task id for set")
+    for k in ("--project", "--owner", "--status", "--note", "--link", "--now", "--progress", "--eta", "--due"):
+        s.add_argument(k)
+    s.add_argument("--title", dest="new_title")
+    s.add_argument("--all", action="store_true")
+    s = sub.add_parser("need")
+    s.add_argument("what", help="what Shaan should do, in plain words: what, where, how long")
+    s.add_argument("--by", help="who is asking (agent name)")
+    s.add_argument("--link", help="the exact URL he should open")
+    s.add_argument("--due", help="HH:MM it must be done by (a live window): due asks go to the top of his dashboard")
+    s.add_argument("--project")
+    argv = sys.argv[1:]
+    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+        argv = ["new"] + argv
+    a = p.parse_args(argv)
+    {"new": cmd_new, "resume": cmd_resume, "ls": cmd_ls, "state": cmd_state, "log": cmd_log, "end": cmd_end,
+     "task": cmd_task, "need": cmd_need}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

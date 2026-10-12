@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Shaan 4 Oct 2026: "put caffeinate on my laptop ... I keep on doing stuff and then leaving my laptop and then it keeps on
+	     closing". Keeps the system awake (idle, disk and, on power, system sleep); the screen may still turn off and lock. -->
+	<key>Label</key><string>com.siso.caffeinate</string>
+	<key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-ims</string></array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

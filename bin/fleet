@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""fleet: detached local Codex fleets, on this laptop or the Mac Mini (Sol 6.1).
+
+  fleet run NAME BRIEF.md... [--on local|mini] [-C DIR] [--max 6] [--worktree]
+      [--sol --why REASON] [-e medium] [--topic DIR] [--then BRIEF.md] [--then-luna]
+  fleet status [NAME] [--on local|mini] [--json]
+  fleet wait NAME [--on local|mini] [--timeout 5400]
+  fleet stop NAME [--on local|mini]
+  fleet watchdog                         launchd's five-minute Mini health check
+
+Mini -C is a Mini path; defaults to its Agent Zero checkout. Every Mini job gets
+an isolated branch/worktree under ~/SISO_Workspace/_data/worktrees/REPO/NAME-JOB.
+Jobs may push their branch; never push main or deploy HALO. No Codex cloud.
+PREVIEW: <shell command using $PORT> in a brief starts after success in that job's
+worktree. Bind to 0.0.0.0; ports 5700-5799, Tailscale URL in manifest. `stop`
+stops jobs and previews, retaining files. `wait` waits for jobs, not previews.
+FLEET_RAM_GB defaults to 9 (GiB). One machine-wide lock gates admission by tree
+RSS + measured per-job reserve and memory pressure. At budget + .5 admit nothing;
+at budget + 1 terminate the newest job and retry once, after 20s kill survivors.
+State: ~/.local/state/fleet/NAME/{manifest.json,*.out,runner.log}; peak RSS is sampled
+once per second. All fleets, synthesis jobs and previews share the RAM budget.
+Remote status fetches all manifests and watchdog health in one SSH call. Mini
+connection: FLEET_MINI_HOST (default shaansisodia@100.66.34.21).
+"""
+import argparse, contextlib, datetime as dt, fcntl, json, os, re, shlex, shutil
+import signal, socket, subprocess, sys, time
+from pathlib import Path
+
+STATE = Path(os.environ.get('FLEET_STATE', str(Path.home() / '.local/state/fleet')))
+ROOT = Path.home() / 'SISO_Workspace'
+MINI_FLEET = 'SISO_Agents/agent-zero/siso-agent-zero/bin/fleet'
+CODEX_RUN = str(ROOT / 'SISO_Agents/siso-harness-lab/bin/codex-run')
+if not Path(CODEX_RUN).exists():
+    CODEX_RUN = shutil.which('codex-run') or CODEX_RUN
+SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'RemoteCommand=none',
+       '-o', 'RequestTTY=no', os.environ.get('FLEET_MINI_HOST', 'shaansisodia@100.66.34.21')]
+GIB = 1024 ** 3
+ENV = dict(os.environ, PATH=str(Path.home() / '.local/bin') + ':/opt/homebrew/bin:' + os.environ.get('PATH', ''))
+
+
+def dispatch(kind, name, workspace, parent, machine, brief='', out=''):
+    target = Path(os.environ.get('A0_DISPATCH_FILE', str(Path.home() / '.local/state/a0/dispatch.jsonl')))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open('a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(json.dumps(dict(at=now(), kind=kind, name=name, workspace=workspace or None,
+                               parent=parent, machine=machine, brief=brief, out=out)) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def now():
+    return dt.datetime.now().isoformat(timespec='seconds')
+
+
+def valid(name):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+        raise ValueError('fleet/job names must contain only letters, digits, dot, dash or underscore')
+    return name
+
+
+def mpath(name):
+    return STATE / valid(name) / 'manifest.json'
+
+
+def load(name):
+    try:
+        return json.loads(mpath(name).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def save(name, m):
+    p = mpath(name)
+    tmp = p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(m, indent=1) + '\n')
+    tmp.replace(p)
+
+
+@contextlib.contextmanager
+def locked():
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / '.scheduler.lock').open('a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def manifests():
+    return [m for p in sorted(STATE.glob('*/manifest.json')) if (m := load(p.parent.name))]
+
+
+def jobs(m):
+    return m['jobs'] + ([m['then']] if m.get('then') else [])
+
+
+def ps():
+    rows = {}
+    out = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,rss=,lstart='], text=True)
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4:
+            pid, parent, rss, started = parts
+            rows[int(pid)] = {'ppid': int(parent), 'rss': int(rss) * 1024, 'start': started}
+    return rows
+
+
+def tree(handle, rows):
+    """Retain birth stamps for descendants even when the root exits/reparents."""
+    known = {int(pid): start for pid, start in handle.get('members', {}).items()}
+    if handle.get('pid') and handle.get('birth'):
+        known[handle['pid']] = handle['birth']
+    members = {pid for pid, start in known.items() if rows.get(pid, {}).get('start') == start}
+    while True:
+        more = {pid for pid, row in rows.items() if row['ppid'] in members}
+        if more <= members:
+            break
+        members |= more
+    handle['members'] = {str(pid): rows[pid]['start'] for pid in members}
+    return members
+
+
+def handles(m):
+    for j in jobs(m):
+        if j.get('pid'):
+            yield j
+        if j.get('preview', {}).get('pid'):
+            yield j['preview']
+
+
+def sample(fleets, rows):
+    seen = set()
+    for m in fleets:
+        for h in handles(m):
+            members = tree(h, rows)
+            h['rss_bytes'] = sum(rows[p]['rss'] for p in members)
+            h['peak_rss_bytes'] = max(h.get('peak_rss_bytes', 0), h['rss_bytes'])
+            seen |= members
+    return sum(rows[p]['rss'] for p in seen)
+
+
+DISK_FLOOR_GB = float(os.environ.get('FLEET_DISK_FLOOR_GB', '10'))
+
+
+def pressure():
+    if sys.platform != 'darwin':
+        return 'normal', 'not-macos'
+    try:
+        level = subprocess.check_output(['sysctl', '-n', 'kern.memorystatus_vm_pressure_level'], text=True).strip()
+        report = subprocess.check_output(['memory_pressure', '-Q'], text=True, timeout=5)
+        free = next((s.strip() for s in report.splitlines() if 'free percentage' in s), 'unknown')
+        return ('critical' if level == '4' else 'normal'), free
+    except (subprocess.SubprocessError, OSError):
+        return 'unknown', 'unavailable'  # fail closed on admission
+
+
+def budget(fleets):
+    # One machine policy, not the smallest number any running fleet was started with (5 Oct: raised 6 -> 9 GiB for hours-long research
+    # owners; the Mini sat 82% free of 16 GB at 6).
+    return float(os.environ.get('FLEET_RAM_GB', 9)) * GIB
+
+
+def reserve(fleets, cap):
+    done = sorted((j.get('ended', ''), j.get('peak_rss_bytes', 0)) for m in fleets for j in jobs(m) if j.get('status') == 'done')
+    peaks = sorted(p for _, p in done[-20:])
+    # The median of the last 20 measured peaks + 20% headroom, .375 GiB bootstrap. Permit one job in a tiny budget.
+    # 5 Oct: the all-time max (a 4.7 GiB screenshot job) made every job reserve 5.6 of 6 GiB, so the Mini ran one job at a time
+    # and queued jobs waited an hour at 82% free. A heavy job still counts at its real RSS once running (admission_rss).
+    return min(cap, max(.375 * GIB, (peaks[len(peaks) // 2] if peaks else 0) * 1.2))
+
+
+def admission_rss(fleets, cap):
+    margin = reserve(fleets, cap)
+    return sum(max(j.get('rss_bytes', 0), margin) for m in fleets for j in jobs(m)
+               if j.get('status') in ('running', 'terminating')) + sum(
+                   j.get('preview', {}).get('rss_bytes', 0) for m in fleets for j in jobs(m))
+
+
+def signal_members(h, rows, sig):
+    for pid in sorted(tree(h, rows), reverse=True):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def terminate(j, rows, reason, retry=False):
+    if j.get('status') == 'terminating':
+        return
+    signal_members(j, rows, signal.SIGTERM)
+    j.update(status='terminating', termination=reason, kill_at=time.time() + 20,
+             requeue=bool(retry and j.get('requeues', 0) < 1))
+
+
+def enforce(fleets, rows, rss):
+    if rss > budget(fleets) + GIB and not any(j.get('status') == 'terminating' for m in fleets for j in jobs(m)):
+        running = [j for m in fleets for j in jobs(m) if j.get('status') == 'running']
+        if running:
+            terminate(max(running, key=lambda j: (j.get('started_ns', 0), j.get('started', ''))), rows, 'RAM overflow', retry=True)
+
+
+def spawn(cmd, cwd, logfile, env=None):
+    with open(logfile, 'a') as out:
+        p = subprocess.Popen(cmd, cwd=cwd, env=env or ENV, stdout=out, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+    rows = ps()
+    return p, {'pid': p.pid, 'birth': rows.get(p.pid, {}).get('start'), 'members': {}, 'rss_bytes': 0}
+
+
+def workdir(m, j):
+    if j.get('dir'):
+        return j['dir']
+    d = Path(m['dir']).expanduser().resolve()
+    if m.get('worktree'):
+        repo = subprocess.check_output(['git', '-C', str(d), 'rev-parse', '--show-toplevel'], text=True).strip()
+        lane = valid(m['name'] + '-' + j['id'])
+        target = ROOT / '_data/worktrees' / Path(repo).name / lane
+        target.parent.mkdir(parents=True, exist_ok=True)
+        branch = 'fleet/' + lane
+        subprocess.run(['git', '-C', repo, 'worktree', 'add', '-b', branch, str(target), 'HEAD'], check=True,
+                       stdout=subprocess.DEVNULL)
+        j['branch'] = branch
+        d = target
+    j['dir'] = str(d)
+    return str(d)
+
+
+def preview(m, j):
+    if not j.get('preview_cmd'):
+        return
+    try:
+        for port in range(5700, 5800):
+            with socket.socket() as s:
+                try:
+                    s.bind(('0.0.0.0', port))
+                    break
+                except OSError:
+                    continue
+        else:
+            raise RuntimeError('all preview ports 5700-5799 are occupied')
+        env = dict(ENV, PORT=str(port), HOST='0.0.0.0')
+        p, h = spawn(['/bin/bash', '-c', j['preview_cmd']], j['dir'], STATE / m['name'] / (j['id'] + '.preview.out'), env)
+        host = 'shaans-mac-mini.tail100d11.ts.net' if m['machine'] == 'mini' else '127.0.0.1'
+        h.update(status='running', port=port, started=now(), started_ns=time.time_ns())
+        j.update(preview=h, url=f'http://{host}:{port}/')
+        # Reserve the port before another job can choose it, without asserting HTTP success.
+        for _ in range(30):
+            if p.poll() is not None:
+                raise RuntimeError(f'preview exited {p.returncode}')
+            with socket.socket() as s:
+                if s.connect_ex(('127.0.0.1', port)) == 0:
+                    return p
+            time.sleep(.1)
+        raise RuntimeError('preview did not listen within 3 seconds')
+    except Exception as e:
+        j['preview_error'] = str(e)
+        if j.get('preview'):
+            signal_members(j['preview'], ps(), signal.SIGTERM)
+            j['preview']['status'] = 'failed'
+
+
+def runner(name):
+    procs = {}
+    while True:
+        with locked():
+            fleets = manifests()
+            m = next(x for x in fleets if x['name'] == name)
+            rows = ps()
+            rss = sample(fleets, rows)
+            enforce(fleets, rows, rss)
+            for j in jobs(m):
+                p = procs.get(j['id'])
+                if j.get('status') == 'terminating':
+                    if time.time() >= j['kill_at']:
+                        signal_members(j, rows, signal.SIGKILL)
+                    if p:
+                        p.poll()
+                    if not tree(j, ps()):
+                        j.update(status='queued' if j['requeue'] else 'stopped', ended=now())
+                        j['requeues'] = j.get('requeues', 0) + int(j['requeue'])
+                        j.pop('pid', None)
+                        procs.pop(j['id'], None)
+                elif p and p.poll() is not None:
+                    # Clean remaining descendants before marking the job complete.
+                    if tree(j, ps()):
+                        terminate(j, rows, 'job left descendants')
+                        continue
+                    j.update(status='done' if p.returncode == 0 else 'failed', exit=p.returncode, ended=now())
+                    procs.pop(j['id'])
+                    j.pop('pid', None)
+                    if j['status'] == 'done' and not m.get('stopped'):
+                        pp = preview(m, j)
+                        if pp:
+                            procs[(j['id'], 'preview')] = pp
+                pp = procs.get((j['id'], 'preview'))
+                if pp and pp.poll() is not None:
+                    j['preview'].update(status='failed', exit=pp.returncode)
+                    procs.pop((j['id'], 'preview'))
+                if j.get('preview', {}).get('status') == 'running' and not tree(j['preview'], rows):
+                    # Newly spawned previews aren't in the snapshot from the start of this tick.
+                    if not tree(j['preview'], ps()):
+                        j['preview']['status'] = 'failed'
+            t = m.get('then')
+            if t and t['status'] == 'waiting' and all(j['status'] in ('done', 'failed', 'stopped') for j in m['jobs']):
+                if m.get('stopped'):
+                    t['status'] = 'stopped'
+                else:
+                    outs = '\n'.join(f"- {j['id']} ({j['status']}): {STATE / name / (j['id'] + '.out')}" for j in m['jobs'])
+                    bp = STATE / name / 'then.md'
+                    bp.write_text(Path(t['source']).read_text() + f'\n\nFleet outputs:\n{outs}\nTopic: {m.get("topic", "")}\n')
+                    t.update(brief=str(bp), status='queued')
+            # Re-sample after completions/previews. All admissions happen under this same lock.
+            rows = ps()
+            rss = sample(fleets, rows)
+            level, free = pressure()
+            cap = budget(fleets)
+            planned = admission_rss(fleets, cap)
+            for j in jobs(m):
+                if m.get('stopped') or j['status'] != 'queued':
+                    continue
+                running = sum(x.get('status') in ('running', 'terminating') for x in jobs(m))
+                if running >= m['max'] or level != 'normal' or rss > cap + .5 * GIB or planned + reserve(fleets, cap) > cap:
+                    break
+                if shutil.disk_usage(os.path.expanduser('~')).free < DISK_FLOOR_GB * GIB:
+                    m['note'] = f'disk below {DISK_FLOOR_GB} GB free: waiting'  # 3 Oct: the Mini hung with a full disk
+                    break
+                try:
+                    d = workdir(m, j)
+                    cmd = [CODEX_RUN, '--as', m['name'] + '/' + j['id'], '--parent', m.get('parent') or 'Agent Zero', '--workspace', m.get('workspace') or '', '-m', j.get('model', m['model']), '--why', m['why'], '-e', m['effort'], '-C', d, j['brief']]
+                    p, h = spawn(cmd, d, STATE / name / (j['id'] + '.out'))
+                    j['worker'] = m['name'] + '/' + j['id']
+                    dispatch('fleet-job', j['worker'], m.get('workspace'), m.get('parent') or 'Agent Zero', 'mini' if m['machine'] == 'mini' else 'laptop', j['brief'], str(STATE / name / (j['id'] + '.out')))
+                    procs[j['id']] = p
+                    j.update(h, status='running', started=now(), started_ns=time.time_ns())
+                    planned += reserve(fleets, cap)
+                    m.setdefault('admissions', []).append({'at': now(), 'job': j['id'], 'running': running + 1,
+                                                          'rss_before_bytes': sample(fleets, ps()), 'reserve_bytes': reserve(fleets, cap)})
+                except Exception as e:
+                    j.update(status='failed', error=str(e), ended=now())
+            if all(j['status'] in ('done', 'failed', 'stopped') for j in jobs(m)):
+                m.setdefault('finished', now())
+            m['rss_bytes'] = sum(h.get('rss_bytes', 0) for h in handles(m))
+            m['pressure'] = level
+            for other in fleets:
+                save(other['name'], other)
+            alive = any(tree(h, ps()) for h in handles(m))
+            if m.get('finished') and not alive:
+                return
+        time.sleep(1)
+
+
+def ssh_call(args, payload=None):
+    cmd = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + \
+          'python3 "$HOME/SISO_Workspace/' + MINI_FLEET + '" ' + shlex.join(args)
+    r = subprocess.run(SSH + [cmd], input=payload, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if r.returncode:
+        raise RuntimeError('Mini SSH failed: ' + r.stderr.strip()[-500:])
+    return r.stdout
+
+
+def run(a):
+    valid(a.name)
+    a.parent = a.parent or os.environ.get('AB_HOST_NAME') or 'Agent Zero'
+    ids = [valid(Path(b).stem) for b in a.briefs]
+    if len(set(ids)) != len(ids) or 'then' in ids:
+        raise ValueError('brief basenames must be unique and cannot be then')
+    contents = [Path(b).read_text() for b in a.briefs]
+    if a.on == 'mini':
+        request = dict(vars(a), contents=contents, ids=ids, ram_gb=float(os.environ.get('FLEET_RAM_GB', 9)))
+        if a.then:
+            request['then_content'] = Path(a.then).read_text()
+        result = ssh_call(['_remote-run'], json.dumps(request)).strip()
+        dispatch('fleet', a.name, a.workspace, a.parent, 'mini', ', '.join(a.briefs))
+        print(result)
+        return
+    start(a, ids, contents)
+
+
+def start(a, ids, contents):
+    with locked():
+        if mpath(a.name).exists():
+            raise ValueError('fleet name already exists; use a new name')
+        d = Path(a.C or os.getcwd()).expanduser().resolve()
+        if not d.is_dir():
+            raise ValueError(f'job directory does not exist: {d}')
+        cap = getattr(a, 'ram_gb', float(os.environ.get('FLEET_RAM_GB', 9)))
+        if cap <= 0 or a.max < 1:
+            raise ValueError('RAM budget and --max must be positive')
+        (STATE / a.name).mkdir()
+        jj = []
+        for jid, content in zip(ids, contents):
+            b = STATE / a.name / (jid + '.md')
+            b.write_text(content)
+            match = re.search(r'^PREVIEW:\s*(.+)$', content, re.M)
+            jj.append({'id': jid, 'brief': str(b), 'status': 'queued', 'peak_rss_bytes': 0,
+                       'preview_cmd': match[1] if match else ''})
+        m = dict(name=a.name, parent=a.parent, workspace=a.workspace or None, machine=a.on, created=now(), max=a.max, effort=a.e, dir=str(d), model='gpt-6.1-sol',
+                 why=a.why or 'fleet worker (Shaan: Sol 6.1)', sol=True, jobs=jj, ram_gb=cap,
+                 worktree=a.worktree or a.on == 'mini', topic=str(Path(a.topic).expanduser().resolve()) if a.topic else '')
+        m['then'] = None
+        if a.then:
+            b = STATE / a.name / 'synthesis-source.md'
+            b.write_text(getattr(a, 'then_content', None) or Path(a.then).read_text())
+            m['then'] = dict(id='then', source=str(b), model='gpt-6-luna' if a.then_luna else 'gpt-6.1-sol', status='waiting')
+        save(a.name, m)
+        dispatch('fleet', a.name, a.workspace, a.parent, 'mini' if a.on == 'mini' else 'laptop', ', '.join(a.briefs))
+        p, h = spawn([sys.executable, str(Path(__file__).resolve()), '_runner', a.name], str(d), STATE / a.name / 'runner.log')
+        m['runner_pid'] = p.pid
+        save(a.name, m)
+    print(f"fleet {a.name}: {len(jj)} jobs on {a.on}, {cap:g} GiB, {m['model']} (runner {p.pid})")
+
+
+def snapshot():
+    log = Path.home() / '.local/state/mini-watchdog.log'
+    health = log.read_text().splitlines()[-1:] if log.exists() else []
+    return dict(fleets=manifests(), health=health)
+
+
+def collect(on):
+    result = []
+    health = []
+    if on in (None, 'local'):
+        result += manifests()
+    if on in (None, 'mini'):
+        try:
+            remote = json.loads(ssh_call(['_snapshot']))
+            result += remote['fleets']
+            health = remote['health']
+        except Exception as e:
+            if on == 'mini':
+                raise
+            print(str(e), file=sys.stderr)
+    return result, health
+
+
+def display(a, fleets, health):
+    fleets = [m for m in fleets if not a.name or m['name'] == a.name]
+    if getattr(a, 'json', False):
+        print(json.dumps(fleets, indent=1))
+        return
+    for m in fleets:
+        c = {s: sum(j['status'] == s for j in m['jobs']) for s in ('queued', 'running', 'done', 'failed', 'stopped')}
+        print(f"{m['name']} [{m.get('machine', 'local')}]: " + ', '.join(f'{v} {k}' for k, v in c.items()) + f" · {m['model']}")
+        for j in jobs(m):
+            print(f"  {j['status']:11} {j['id']} peak RSS {j.get('peak_rss_bytes', 0) / 1024**2:.1f} MiB" + (f" · preview {j.get('preview', {}).get('status', 'unknown')} · {j['url']}" if j.get('url') else ''))
+        if m.get('topic'):
+            print('  topic ' + m['topic'])
+    for line in health:
+        print('mini health: ' + line)
+
+
+def status(a):
+    display(a, *collect(a.on))
+
+
+def wait(a):
+    end = time.time() + a.timeout
+    while time.time() < end:
+        fleets, health = collect(a.on)
+        found = [m for m in fleets if m['name'] == a.name]
+        if found and all(m.get('finished') for m in found):
+            display(a, found, health)
+            return 1 if any(j['status'] != 'done' for m in found for j in jobs(m)) else 0
+        time.sleep(5)
+    raise RuntimeError(f'fleet {a.name}: still running after {a.timeout}s')
+
+
+def stop(a):
+    if a.on == 'mini' or (a.on is None and not load(a.name)):
+        print(ssh_call(['stop', a.name, '--on', 'local']).strip())
+        return
+    with locked():
+        m = load(a.name)
+        if not m:
+            raise ValueError('fleet not found locally; specify --on mini')
+        m['stopped'] = now()
+        rows = ps()
+        for j in jobs(m):
+            if j.get('pid') and tree(j, rows):
+                terminate(j, rows, 'fleet stop')
+            elif j['status'] in ('queued', 'waiting'):
+                j['status'] = 'stopped'
+            h = j.get('preview')
+            if h:
+                signal_members(h, rows, signal.SIGTERM)
+                h['status'] = 'stopped'
+        save(a.name, m)
+    # Preview descendants also get the full TERM grace, then exact-PID KILL.
+    deadline = time.time() + 20
+    while time.time() < deadline and any(tree(h, ps()) for h in handles(m)):
+        time.sleep(.5)
+    with locked():
+        m = load(a.name)
+        for h in handles(m):
+            signal_members(h, ps(), signal.SIGKILL)
+        save(a.name, m)
+    print(f'fleet {a.name}: stopped job and preview trees; files retained')
+
+
+def watchdog():
+    with locked():
+        fleets = manifests()
+        rows = ps()
+        rss = sample(fleets, rows)
+        user = os.getuid()
+        count = len(subprocess.check_output(['ps', '-U', str(user), '-o', 'pid='], text=True).splitlines())
+        actions = []
+        if count > 2000:
+            running = sorted([h for m in fleets for h in handles(m) if h.get('status') == 'running'],
+                             key=lambda j: (j.get('started_ns', 0), j.get('started', '')), reverse=True)
+            # Stop one tree, then measure again; never touch unrelated PIDs.
+            for j in running:
+                terminate(j, rows, 'process watchdog')
+                deadline = time.time() + 20
+                while time.time() < deadline and tree(j, ps()):
+                    time.sleep(.5)
+                signal_members(j, ps(), signal.SIGKILL)
+                actions.append(j.get('id') or 'preview:' + str(j.get('pid')))
+                if not j.get('id'):
+                    j['status'] = 'stopped'
+                count = len(subprocess.check_output(['ps', '-U', str(user), '-o', 'pid='], text=True).splitlines())
+                if count < 1500:
+                    break
+        enforce(fleets, rows, rss)
+        for m in fleets:
+            save(m['name'], m)
+        level, free = pressure()
+        line = f'{now()} procs={count} free={free} pressure={level} fleet_rss_mib={rss/1024**2:.1f} stopped={",".join(actions) or "none"}'
+        log = Path.home() / '.local/state/mini-watchdog.log'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.exists() and log.stat().st_size >= 1024**2:
+            log.replace(log.with_suffix('.log.1'))
+        with log.open('a') as out:
+            out.write(line + '\n')
+        print(line)
+
+
+def backfill(a):
+    if a.on == 'mini':
+        print(ssh_call(['backfill', '--on', 'local']).strip())
+        return
+    def ownership(name):
+        n = re.sub(r'^(?:#\s*)?(?:Job:\s*)?', '', name, flags=re.I).upper()
+        if n.startswith(('KIKAS', 'KIKA')): return 'kikas', 'KIKAS'
+        if n.startswith(('OP-DESIGN', 'OPERATOR-', 'OP-', 'STREAMING-SOL')): return 'halo-operator', 'OPERATOR-DESIGN'
+        if n.startswith(('AB-', 'PACK-', 'DASH', 'TIMELINE', 'RECONNECT', 'FLEET-MINI', 'AGENT BASE', 'AGENT-BASE')): return 'agent-base', 'Agent Zero'
+        if n.startswith(('MINI-PROOF', 'MINI-BUDGET', 'ZERO-SOL')): return 'zero', 'Agent Zero'
+        if n.startswith('TASK-LANES'): return 'tasks', 'Agent Zero'
+        if n.startswith('APP-ATLAS'): return 'app-atlas', 'Agent Zero'
+        if n == 'FAHMY': return 'fahmy', 'Agent Zero'
+        return None
+    target = Path(os.environ.get('A0_DISPATCH_FILE', str(Path.home() / '.local/state/a0/dispatch.jsonl')))
+    existing = set()
+    if target.exists():
+        for line in target.read_text().splitlines():
+            try:
+                d = json.loads(line)
+                existing.add((d.get('kind'), d.get('name'), d.get('machine')))
+            except ValueError: pass
+    count = 0
+    machine = 'mini' if 'mini' in socket.gethostname().lower() else 'laptop'
+    def record(kind, name, pair, brief='', out=''):
+        nonlocal count
+        if (kind, name, machine) in existing: return
+        dispatch(kind, name, pair[0], pair[1], machine, brief, out)
+        existing.add((kind, name, machine)); count += 1
+    with locked():
+        for m in manifests():
+            pair = ownership(m['name'])
+            if not pair: continue
+            if not m.get('parent'): m['parent'] = pair[1]
+            if not m.get('workspace'): m['workspace'] = pair[0]
+            save(m['name'], m)
+            pair = (m['workspace'], m['parent'])
+            record('fleet', m['name'], pair)
+            for j in jobs(m): record('fleet-job', j.get('worker') or m['name'] + '/' + j['id'], pair, j.get('brief', ''), str(STATE / m['name'] / (j['id'] + '.out')))
+    hosts = Path(os.environ.get('AB_HOSTS_DIR', str(Path.home() / '.local/state/agent-base/hosts')))
+    runs = Path(os.environ.get('CODEX_RUN_STATE', str(Path.home() / '.local/state/codex-run'))) / 'runs'
+    for kind, paths in [('host', hosts.glob('*.json')), ('codex-run', runs.glob('*.meta.json'))]:
+        for p in paths:
+            try: d = json.loads(p.read_text())
+            except (OSError, ValueError): continue
+            name = d.get('worker') or d.get('name') or ''
+            pair = ownership(name) or ownership(d.get('name') or '')
+            if not pair: continue
+            # Host lead/run metadata is stronger evidence of dispatcher than a backfill prefix.
+            pair = (d.get('workspace') or pair[0], d.get('parent') or d.get('lead') or pair[1])
+            record(kind, name, pair, d.get('about') or '', str(p.with_name(p.name.replace('.meta.json', '.last.md'))) if kind == 'codex-run' else '')
+    print(f'backfill: {count} dispatch records on {machine}')
+
+
+def main():
+    if sys.argv[1:2] == ['_runner']:
+        return runner(sys.argv[2])
+    if sys.argv[1:2] == ['_snapshot']:
+        print(json.dumps(snapshot()))
+        return
+    if sys.argv[1:2] == ['_remote-run']:
+        req = json.load(sys.stdin)
+        a = argparse.Namespace(**req)
+        a.C = a.C or str(ROOT / 'SISO_Agents/agent-zero/siso-agent-zero')
+        start(a, req['ids'], req['contents'])
+        return
+    p = argparse.ArgumentParser(prog='fleet', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s = p.add_subparsers(dest='cmd', required=True)
+    r = s.add_parser('run'); r.add_argument('name'); r.add_argument('briefs', nargs='+'); r.add_argument('--max', type=int, default=6)
+    r.add_argument('--on', choices=['local', 'mini'], default='local'); r.add_argument('-C', default=None)
+    r.add_argument('--sol', action='store_true'); r.add_argument('--why', default=''); r.add_argument('-e', default='medium')
+    r.add_argument('--worktree', action='store_true'); r.add_argument('--topic', default=''); r.add_argument('--then', default='')
+    r.add_argument('--then-luna', action='store_true')
+    r.add_argument('--workspace', default=''); r.add_argument('--parent', default='')
+    bf = s.add_parser('backfill'); bf.add_argument('--on', choices=['local', 'mini'], default='local')
+    st = s.add_parser('status'); st.add_argument('name', nargs='?'); st.add_argument('--json', action='store_true'); st.add_argument('--on', choices=['local', 'mini'])
+    w = s.add_parser('wait'); w.add_argument('name'); w.add_argument('--timeout', type=int, default=5400); w.add_argument('--on', choices=['local', 'mini'])
+    x = s.add_parser('stop'); x.add_argument('name'); x.add_argument('--on', choices=['local', 'mini'])
+    s.add_parser('watchdog')
+    a = p.parse_args()
+    return {'backfill': backfill, 'run': run, 'status': status, 'wait': wait, 'stop': stop, 'watchdog': lambda _: watchdog()}[a.cmd](a)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main() or 0)
+    except (ValueError, RuntimeError, subprocess.SubprocessError, OSError) as e:
+        sys.exit(f'fleet: {e}')

@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""jobstop: stop one job and EVERY process under it, then prove nothing of it is left.
+
+4 Oct 2026: A0 killed a codex-run and its direct children, but Codex's node and native processes lived on, kept editing Agent Base's
+dev copy for ten minutes, and a second Builder job started in the same copy: two writers. This walks the whole process tree.
+
+  jobstop <pid> [<pid> ...]     TERM the tree, KILL what is left after 3 s, print what died; exit 1 if anything survived
+"""
+import os, signal, subprocess, sys, time
+
+
+def tree(root):
+    rows = [l.split(None, 1) for l in subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines()]
+    kids = {}
+    for pid, ppid in rows:
+        kids.setdefault(int(ppid), []).append(int(pid))
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo += kids.get(p, [])
+    return out
+
+
+def alive(p):
+    try:
+        os.kill(p, 0); return True
+    except OSError:
+        return False
+
+
+def main(argv):
+    if not argv:
+        print(__doc__.strip()); return 2
+    pids = []
+    for a in argv:
+        pids += [p for p in tree(int(a)) if p not in pids]
+    for p in reversed(pids):  # leaves first, so no child is orphaned to launchd mid-walk
+        try: os.kill(p, signal.SIGTERM)
+        except OSError: pass
+    time.sleep(3)
+    for p in pids:
+        if alive(p):
+            try: os.kill(p, signal.SIGKILL)
+            except OSError: pass
+    time.sleep(0.5)
+    left = [p for p in pids if alive(p)]
+    print(f"stopped {len(pids) - len(left)} of {len(pids)} processes" + (f"; still alive: {left}" if left else ""))
+    return 1 if left else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

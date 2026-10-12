@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""pipeline: how long each Agent Base ticket took from Shaan's words to live, and which stage ate the time.
+
+Shaan, 4 Oct 2026: "we're going to constantly be adding improvements to the agent base. So this pipeline needs to be known by agent
+zero and iterated by agent zero. And we can see how long it takes to do stuff and where retardations are" · "do this in a way where
+how elon would do it". So: one number (minutes from his words to live), no new service, read only the records that already exist:
+  said   tasks/t-NNNN.json created               (his words became a task)
+  picked ~/.local/state/codex-run/runs/*.meta.json (a run whose brief names the ticket started)
+  built  the first commit on Agent Base main whose subject starts "t-NNNN"
+  live   ~/.local/state/agent-base/live/live.jsonl (the first live build holding that commit)
+Stages: wait = said->picked, build = picked->built, ship = built->live.
+
+  pipeline            tickets from the last 7 days, then the medians and the slowest stage
+  pipeline --days N
+  pipeline --json
+"""
+import datetime as dt, glob, json, os, re, statistics, subprocess, sys
+
+HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+H = os.path.expanduser("~")
+RUNNER = f"{H}/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base/ship-runner"
+RUNS = f"{H}/.local/state/codex-run/runs"
+LIVE = f"{H}/.local/state/agent-base/live/live.jsonl"
+
+
+def t(s):
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if isinstance(s, str) else dt.datetime.fromtimestamp(s).astimezone()
+
+
+def git(*a):
+    return subprocess.run(["git", "-C", RUNNER, *a], capture_output=True, text=True).stdout
+
+
+def main(argv):
+    days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 7
+    since = dt.datetime.now().astimezone() - dt.timedelta(days=days)
+    tasks = {}
+    for f in glob.glob(f"{HOME}/tasks/t-*.json"):
+        try:
+            x = json.load(open(f))
+        except ValueError:
+            continue
+        if x.get("project") == "Agent Base" and t(x["created"]) >= since:
+            tasks[x["id"]] = {"id": x["id"], "title": x.get("title", ""), "said": t(x["created"]), "stage": x.get("stage")}
+    for f in glob.glob(f"{RUNS}/*.meta.json"):
+        try:
+            m = json.load(open(f))
+        except ValueError:
+            continue
+        for k in m.get("tickets") or []:
+            if k in tasks and "picked" not in tasks[k]:
+                tasks[k]["picked"] = t(m["started"])
+    subprocess.run(["git", "-C", RUNNER, "fetch", "-q", "origin", "main"], capture_output=True)
+    for line in git("log", "origin/main", f"--since={since.isoformat()}", "--reverse", "--format=%H %cI %s").splitlines():
+        sha, when, subject = line.split(" ", 2)
+        m = re.match(r"(t-\d{4})", subject)
+        if m and m.group(1) in tasks and "built" not in tasks[m.group(1)]:
+            tasks[m.group(1)].update(built=t(when), sha=sha)
+    lives = [json.loads(l) for l in open(LIVE) if l.strip()] if os.path.exists(LIVE) else []
+    lives = [r for r in lives if r.get("result") == "live"]
+    for x in tasks.values():
+        for r in lives:
+            if "sha" in x and t(r["at"]) >= x["built"] and subprocess.run(
+                    ["git", "-C", RUNNER, "merge-base", "--is-ancestor", x["sha"], r["sha"]]).returncode == 0:
+                x["live"] = t(r["at"]); break
+    # A ticket closed some other way (dropped, or live before the pipeline) never went through it: leave it out of the numbers.
+    tasks = {k: x for k, x in tasks.items() if "built" in x or x["stage"] not in ("live", "dropped", "happy")}
+    mins = lambda a, b: round((b - a).total_seconds() / 60) if a and b else None
+    rows = []
+    for x in sorted(tasks.values(), key=lambda x: x["said"]):
+        rows.append({"id": x["id"], "title": x["title"][:60], "wait": mins(x["said"], x.get("picked")),
+                     "build": mins(x.get("picked"), x.get("built")), "ship": mins(x.get("built"), x.get("live")),
+                     "total": mins(x["said"], x.get("live")),
+                     "at": "live" if "live" in x else "built" if "built" in x else "building" if "picked" in x else "waiting"})
+    med = {k: statistics.median([r[k] for r in rows if r[k] is not None]) if any(r[k] is not None for r in rows) else None
+           for k in ("wait", "build", "ship", "total")}
+    slow = max((k for k in ("wait", "build", "ship") if med[k] is not None), key=lambda k: med[k], default=None)
+    if "--json" in argv:
+        print(json.dumps({"rows": rows, "median_min": med, "slowest": slow})); return 0
+    print(f"{'ticket':7} {'now':8} {'wait':>5} {'build':>5} {'ship':>5} {'total':>6}  (minutes)")
+    f = lambda v: "-" if v is None else str(v)
+    for r in rows:
+        print(f"{r['id']:7} {r['at']:8} {f(r['wait']):>5} {f(r['build']):>5} {f(r['ship']):>5} {f(r['total']):>6}  {r['title']}")
+    done = sum(r["at"] == "live" for r in rows)
+    print(f"\n{done} of {len(rows)} live · median words->live {f(med['total'])} min · wait {f(med['wait'])} · build {f(med['build'])} · ship {f(med['ship'])}"
+          + (f" · slowest stage: {slow}" if slow else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# a0-sdk: run Agent Zero inside Agent Base's own host (siso-host, the Agent SDK) instead of the plain Claude CLI. Only then does
+# herdr see the pane as an agent ("siso") and Agent Base show the chat as Agent Zero: herdr does not recognise the CLI's
+# versioned binary, so a plain `claude` Agent Zero never appears in the app (found 4 Oct, chat b18232dc).
+# Shaan, 2 Oct: "If we move agent 0 over to SDK, I swear none of these issues continue happening".
+#   a0-sdk --resume ID [-n A0]      what the keep-alive runs
+#   a0-sdk [--model M] [--effort E] "first prompt"
+# Moved here from siso-firstmate/bin-az/a0-sdk; the login is claude-siso-3 (fuzeheritage's ~/.claude-siso is off since 3 Oct).
+set -euo pipefail
+
+export CLAUDE_CONFIG_DIR="$HOME/.config/claude-siso-3"
+export SISO_A0=1            # no early auto-compact for Agent Zero
+export FM_ALLOW_SUBAGENT=1
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+
+B="$HOME/SISO_Workspace/SISO_Agents/siso-harness-lab/bin"
+# shellcheck source=/dev/null
+source "$B/context-cap.sh"
+siso_context_cap "$@"
+# shellcheck source=/dev/null
+source "$B/agent-boot.sh"
+siso_agent_boot
+
+# siso-host spells some flags differently: --name for -n, a bare last word is the first prompt, no --no-chrome.
+out=()
+set -- ${SISO_ARGS[@]+"${SISO_ARGS[@]}"}
+while (($#)); do
+  case $1 in
+    --no-chrome|--chrome|--dangerously-skip-permissions) shift ;;
+    --plugin-dir) shift; (($#)) && shift ;;   # the CLI's lean-boot plugin folder; siso-host has no such option
+    -n|--name) out+=(--name "${2:-A0}"); shift; (($#)) && shift ;;
+    --resume|--settings|--model|--effort|--permission-mode) out+=("$1" "${2:-}"); shift; (($#)) && shift ;;
+    --*) out+=("$1"); shift ;;
+    *) out+=(--prompt "$1"); shift ;;
+  esac
+done
+[[ " ${out[*]-} " == *" --model "* ]] || out+=(--model "${A0_MODEL:-claude-opus-5-5[1m]}")
+[[ " ${out[*]-} " == *" --name "* ]] || out+=(--name A0)
+
+cd "$(dirname "$(dirname "$(readlink -f "$0")")")"   # Agent Zero runs from its own repo
+exec "$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host" \
+  --keep-herdr-env --permission-mode bypassPermissions "${out[@]}"

@@ -1,0 +1,636 @@
+#!/usr/bin/env python3
+"""Build and inspect A0's private, redacted conversation archive.
+
+Usage: a0-transcript build | day YYYY-MM-DD | search WORDS [--days N] | coverage
+"""
+import datetime as dt
+import difflib
+import glob
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+OUT = HERE / ".agents/a0/transcript"
+TZ = dt.timezone(dt.timedelta(hours=7))
+SLUGS = ("00-agent-zero", "siso-agents-agent-zero-firstmate", "siso-workspace-firstmate",
+         "siso-agents-firstmate", "siso-agent-zero-protocol", "agent-zero-siso-firstmate", "agent-zero-siso-agent-zero", "00_agent_zero")
+EXCLUDED = re.compile(r"<(system-reminder|task-notification|cross-session-message|command-[^ >]+|local-command-stdout)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+TAGS = re.compile(r"</?pasted_content\b[^>]*>", re.I)
+PASTED = re.compile(r"<pasted_content\b[^>]*>.*?</pasted_content\s*>", re.I | re.S)
+SECRET_VALUE = re.compile(r"(?i)\b(password|passcode|pw|pass)\b\s*(?::|=|\bis\b)\s*([\"']?)([^\s,;\"'<>]+)")
+SPOKEN_PASSWORD = re.compile(
+    r"(?i)\b(?:password(?:'s)?|passcode|pass)\s+(?:is|was)\s+"
+    r"((?:(?!like\b|and\b|but\b|or\b)[^\s,.;:!?]+(?:\s+|(?=[,.;:!?]|$))){1,3})"
+)
+SECRET_SHAPES = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|xai-[A-Za-z0-9_-]{12,}|AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]{32,})(?![A-Za-z0-9])")
+PASSWORD_LIKE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_!@#$%^&*+=~?-]{8,}(?![A-Za-z0-9])")
+FILTER_OUTPUT = re.compile(
+    r"(?is)(?:\x1b\[|\[2m|\bPreCompact\b|\bCheckpoint at\b|\bSessionStart\b|"
+    r"You are the next Agent Zero|You are a0-|Read the top entry of|FIRSTMATE_OP|"
+    r"(?m:^\s*Another Claude session sent a message)|(?m:^\s*<teammate-message\b)|"
+    r"(?m:^\s*A0\s)|(?m:^\s*(?:\[SYSTEM\b|Monitor\b|Hook output\b)))"
+)
+COMMAND_WRAPPER = re.compile(r"(?is)<(?:command-name|local-command-stdout)\b")
+JSON_TOOL_PREFIX = re.compile(r"(?is)^\s*\{\s*[\"'](?:type|tool_use_id)[\"']\s*:")
+
+
+def local_iso(value):
+    if isinstance(value, (int, float)):
+        stamp = float(value)
+        if stamp > 1_000_000_000_000:
+            stamp /= 1000
+        return dt.datetime.fromtimestamp(stamp, TZ).isoformat(timespec="seconds")
+    if isinstance(value, str) and value:
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=TZ)
+            return parsed.astimezone(TZ).isoformat(timespec="seconds")
+        except ValueError:
+            pass
+    return ""
+
+
+def content_text(message):
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, dict) and part.get("type") not in ("tool_result", "image", "document"):
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
+
+def clean_text(text):
+    outside_pastes = PASTED.sub("", text)
+    if FILTER_OUTPUT.search(outside_pastes) or COMMAND_WRAPPER.search(outside_pastes):
+        return ""
+    if JSON_TOOL_PREFIX.search(outside_pastes):
+        return ""
+    candidate = outside_pastes.strip()
+    if candidate.startswith(("{", "[")):
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return ""
+    text = EXCLUDED.sub(" ", text)
+    text = TAGS.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def is_password_like(value, before="", after=""):
+    # Avoid emails, paths, URLs, commits/hashes, and version strings.
+    email = "@" in value and "." in value.rsplit("@", 1)[-1]
+    if (email or re.fullmatch(r"(?i)v?\d+(?:\.\d+)+", value) or
+            re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{2})?", value) or
+            (re.match(r"\.\d+(?:[._-]\d+)*\b", after) and re.search(r"\d$", value)) or
+            re.fullmatch(r"[A-Fa-f0-9]{8,}", value) or
+            re.match(r"(?i)\.(?:js|mjs|cjs|css|map|ts|tsx|jsx|json|html|png|svg|wasm)(?:[:/]|\b)", after) or
+            re.search(r"(?:https?://|[/\\])[^\s]*$", before) or
+            re.match(r"[^\s]*[/\\]", after)):
+        return False
+    # Hyphen and underscore are common in dates, slugs, and identifiers; count
+    # password punctuation separately from those separators.
+    return bool(re.search(r"\d", value) and
+                (re.search(r"[A-Z]", value) or re.search(r"[^A-Za-z0-9_-]", value)))
+
+
+def redact(text):
+    count = 0
+    kinds = {}
+
+    def replace_secret(match):
+        nonlocal count
+        kind = match.group(1).lower()
+        value = match.group(3).rstrip(".,:!?)\\]")
+        if value.startswith("[REDACTED:"):
+            return match.group(0)
+        if not value or not re.search(r"[0-9]|[^A-Za-z0-9]", value):
+            return match.group(0)
+        count += 1
+        kinds[kind] = kinds.get(kind, 0) + 1
+        return f"{match.group(1)} [REDACTED:{kind}]"
+
+    def replace_spoken_password(match):
+        nonlocal count
+        count += 1
+        kinds["password"] = kinds.get("password", 0) + 1
+        return "[REDACTED:password]"
+
+    text = SPOKEN_PASSWORD.sub(replace_spoken_password, text)
+    text = SECRET_VALUE.sub(replace_secret, text)
+
+    def replace_secret_shape(match):
+        nonlocal count
+        value = match.group(0)
+        if not (value.startswith(("sk-", "ghp_", "xai-", "AKIA", "eyJ")) or
+                (len(value) >= 32 and re.search(r"[A-Za-z]", value) and re.search(r"[0-9]", value))):
+            return value
+        count += 1
+        kinds["token"] = kinds.get("token", 0) + 1
+        return "[REDACTED:token]"
+
+    text = SECRET_SHAPES.sub(replace_secret_shape, text)
+
+    def replace_password_like(match):
+        nonlocal count
+        value = match.group(0)
+        before = text[max(0, match.start() - 80):match.start()]
+        after = text[match.end():match.end() + 80]
+        if not is_password_like(value, before, after):
+            return value
+        count += 1
+        kinds["password-like"] = kinds.get("password-like", 0) + 1
+        return "[REDACTED:password-like]"
+
+    return PASSWORD_LIKE.sub(replace_password_like, text), count, kinds
+
+
+ALL_AGENTS = os.environ.get("A0_TRANSCRIPT_ALL") == "1"  # `build --all`: his words to every agent, not only Agent Zero
+MACHINE = re.compile(r"^(Stop hook feedback|Another Claude session|This session is being continued|Compacted\.|Reply with|You are |TASK:|Base directory for|Caveat:|\[Request interrupted|Memory check|Compute \d|Decision: we chose|/)", re.I)
+
+
+def to_label(folder):
+    """Which agent/project a message went to, from Claude's project folder name."""
+    name = folder.split("-SISO-Workspace-", 1)[-1] if "-SISO-Workspace-" in folder else folder
+    return "agent-zero" if any(slug in folder.lower() for slug in SLUGS) else name.strip("-")
+
+
+def his_voice(text, row):
+    """Shaan's words, not a machine's: typed or dictated in an interactive session, no brief/markdown shape (4 Oct)."""
+    if row.get("entrypoint") not in (None, "cli") or MACHINE.search(text.strip()):
+        return False
+    t = text.strip()
+    if re.match(r"^([0-9a-f]{7,40}\b|R\d+\.\d+|A0\b|Relay \d|Owner\b|Your resume prompt|[A-Z][A-Z0-9-]{2,30}( \d\d:\d\d)?\s*(:|→|->))", t):
+        return False  # an agent's relay or report typed into a pane
+    if re.search(r"\bShaan\b", t) or re.search(r"[—·⏺⎿]", t):
+        return False  # he never names himself in the third person; his voice transcription never makes these marks
+    lines = t.splitlines()
+    shaped = sum(1 for l in lines if re.match(r"^\s*(#{1,4} |```|RETURN|STATUS:|CHANGED:|VERIFY:|\| )", l))
+    return shaped == 0
+
+
+def session_files():
+    roots = set(glob.glob(str(Path.home() / ".claude*")))
+    roots.update(glob.glob(str(Path.home() / ".claude*/.claude")))
+    roots.update(glob.glob(str(Path.home() / ".config/claude-*")))
+    found = set()
+    for root in roots:
+        project_root = Path(root) / "projects"
+        if not project_root.is_dir():
+            continue
+        for folder in project_root.iterdir():
+            name = folder.name.lower()
+            if not folder.is_dir() or "-projects-" in name or "halocrm" in name:
+                continue
+            if "fahmy" in str(root).lower() or "-private-" in name or name.endswith("-users-shaansisodia"):
+                continue  # Fahmy's login is his consent boundary; temp dirs and the home folder are not projects
+            if not ALL_AGENTS and not any(slug in name for slug in SLUGS):
+                continue
+            for path in folder.rglob("*.jsonl"):
+                found.add((path, folder.name))
+    return sorted(found, key=lambda item: str(item[0]))
+
+
+def collect_chats():
+    messages = []
+    seen = set()
+    seen_filtered_sensitive = set()
+    sessions = {}
+    stats = {}
+    for path, source_folder in session_files():
+        folder_stats = stats.setdefault(source_folder, {"sessions_read": 0, "messages_kept": 0})
+        sid = path.stem[:8]
+        session_ids = {sid, path.stem}
+        session_names = {sid.lower(), path.stem.lower(), path.parent.name.lower()}
+        try:
+            with path.open(errors="ignore") as stream:
+                folder_stats["sessions_read"] += 1
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    named = re.search(r'"(?:agentName|customTitle)":"([^"]+)"', line)
+                    if named:
+                        session_names.add(named.group(1).lower())
+                    typ = row.get("type")
+                    for name_key in ("agentName", "customTitle"):
+                        value = row.get(name_key)
+                        if isinstance(value, str) and value.strip():
+                            session_names.add(value.strip().lower())
+                    if typ in ("metadata", "system", "assistant"):
+                        continue
+                    att = row.get("attachment") if typ == "attachment" else None
+                    if isinstance(att, dict) and att.get("type") == "queued_command" and isinstance(att.get("prompt"), str):
+                        # Shaan's messages sent while a turn runs (4 Oct: about half his words were missed)
+                        key = str(att.get("delivery_id") or att.get("source_uuid") or row.get("uuid") or "")
+                        said, stamp = clean_text(att["prompt"]), local_iso(row.get("timestamp"))
+                        if said and stamp and key not in seen and his_voice(said, row):
+                            seen.add(key)
+                            safe, nredact, kinds = redact(said)
+                            try:  # the same guard as the archive: anything still password-like is dropped, never stored
+                                verify_password_redactions([{"text": safe, "uuid": key}])
+                            except RuntimeError:
+                                folder_stats["password_labelled_secret_output_filtered"] = folder_stats.get("password_labelled_secret_output_filtered", 0) + 1
+                                continue
+                            messages.append({"at": stamp, "session": sid, "source": "chat-midturn", "to": to_label(source_folder), "text": safe, "chars": len(safe),
+                                             "redactions": nredact, "redaction_kinds": kinds, "uuid": key})
+                            folder_stats["messages_kept"] += 1
+                        continue
+                    msg = row.get("message") if isinstance(row.get("message"), dict) else row
+                    if msg.get("role") not in (None, "user"):
+                        continue
+                    if typ not in (None, "user"):
+                        continue
+                    if any(row.get(key) for key in ("isMeta", "isSidechain", "isCompactSummary")):
+                        continue
+                    original = content_text(msg)
+                    raw = clean_text(original)
+                    if not raw:
+                        uuid = str(row.get("uuid") or msg.get("id") or "")
+                        if uuid and uuid in seen_filtered_sensitive:
+                            continue
+                        labels = [match.start() for match in re.finditer(r"(?i)\b(password|passcode|pw|pass)\b", original)]
+                        shapes = [match.start() for match in SECRET_SHAPES.finditer(original)]
+                        if labels and any(abs(label - shape) <= 128 for label in labels for shape in shapes):
+                            seen_filtered_sensitive.add(uuid)
+                            folder_stats["password_labelled_secret_output_filtered"] = folder_stats.get("password_labelled_secret_output_filtered", 0) + 1
+                        continue
+                    uuid = str(row.get("uuid") or msg.get("id") or "")
+                    if uuid and uuid in seen:
+                        continue
+                    if uuid:
+                        seen.add(uuid)
+                    stamp = local_iso(row.get("timestamp") or msg.get("timestamp"))
+                    if not stamp:
+                        continue
+                    safe, nredact, kinds = redact(raw)
+                    if not his_voice(raw, row):
+                        continue
+                    messages.append({"at": stamp, "session": sid, "source": "chat", "to": to_label(source_folder), "text": safe,
+                                     "chars": len(safe), "redactions": nredact, "redaction_kinds": kinds,
+                                     "uuid": uuid})
+                    folder_stats["messages_kept"] += 1
+                    sessions.setdefault(sid, {"ids": session_ids, "names": session_names, "texts": [],
+                                              "folder": source_folder})["texts"].append(raw)
+        except OSError:
+            continue
+    return messages, sessions, stats
+
+
+def norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def filter_self_test(real_messages):
+    non_shaan = [
+        "\x1b[2mterminal output\x1b[0m",
+        "PreCompact save transcript\nCheckpoint at 2026-10-02",
+        "SessionStart event\nMonitor output\nHook output: event",
+        "You are the next Agent Zero. FIRSTMATE_OP: v1",
+        "A0 → relay\n<command-name>/compact</command-name><local-command-stdout>ok</local-command-stdout>",
+        "Another Claude session sent a message: handoff payload",
+        "<teammate-message teammate_id=\"worker\">internal update</teammate-message>",
+        '{"type":"tool_result","content":"internal payload"}',
+        '{"tool_use_id":"call_123","content":"internal payload"}',
+        '[{"type":"tool_result"}]',
+    ]
+    if any(clean_text(sample) for sample in non_shaan):
+        raise RuntimeError("transcript filter self-test kept a non-Shaan sample")
+    samples = [row["text"] for row in real_messages[:3]]
+    if len(samples) < 3 or any(not clean_text(sample) for sample in samples):
+        raise RuntimeError("transcript filter self-test needs three real Shaan messages")
+    pasted = clean_text("<pasted_content>FIRSTMATE_OP: quoted text</pasted_content>")
+    if pasted != "FIRSTMATE_OP: quoted text":
+        raise RuntimeError("transcript filter self-test removed Shaan's pasted text")
+    return len(non_shaan), len(samples)
+
+
+def redaction_self_test():
+    low_key, _, _ = redact("low key wait; the narrow fix")
+    if low_key != "low key wait; the narrow fix":
+        raise RuntimeError("transcript redactor changed ordinary words")
+    safe_password, password_count, _ = redact("password: BlueSky17!")
+    if "[REDACTED:password]" not in safe_password or password_count != 1:
+        raise RuntimeError("transcript redactor missed a password-shaped value")
+    spoken, spoken_count, spoken_kinds = redact("password is cobalt morning river, like we discussed")
+    if "[REDACTED:password]" not in spoken or "like we discussed" not in spoken or spoken_count != 1 or spoken_kinds.get("password") != 1:
+        raise RuntimeError("transcript redactor missed a spoken password")
+    password_like, shape_count, shape_kinds = redact("login: Summer2026!; mail: person@example.com; version v2.4.1 and Apache-2.0; hash deadbeef; date 2026-10-01T16; skill a0-atlas; asset index-z-dvXmKm.js:205")
+    if "[REDACTED:password-like]" not in password_like or "person@example.com" not in password_like or "v2.4.1" not in password_like or "Apache-2.0" not in password_like or "deadbeef" not in password_like or "2026-10-01T16" not in password_like or "a0-atlas" not in password_like or "index-z-dvXmKm.js" not in password_like or shape_count != 1 or shape_kinds.get("password-like") != 1:
+        raise RuntimeError("transcript redactor missed a password-like value or changed an excluded shape")
+    path_password, path_count, _ = redact("path /tmp/Summer2026!")
+    if "Summer2026!" not in path_password or path_count:
+        raise RuntimeError("transcript redactor changed a path component")
+    plain_password, plain_count, _ = redact("password is like we discussed")
+    if plain_password != "password is like we discussed" or plain_count:
+        raise RuntimeError("transcript redactor consumed prose after a spoken-password boundary")
+    gh_token, token_count, _ = redact("ghp_1234567890abcdefghijkl")
+    if "[REDACTED:token]" not in gh_token or token_count != 1:
+        raise RuntimeError("transcript redactor missed a known token form")
+    password_shape, password_shape_count, _ = redact("login: Sunset2031@ACME")
+    exclusions, exclusion_count, _ = redact("email: a@b.com; model: claude-sonnet-5.5")
+    if "[REDACTED:password-like]" not in password_shape or password_shape_count != 1:
+        raise RuntimeError("transcript redactor missed a password-like @ shape")
+    if "a@b.com" not in exclusions or "claude-sonnet-5.5" not in exclusions or exclusion_count:
+        raise RuntimeError("transcript redactor changed an email address or model version")
+
+
+def verify_password_redactions(messages):
+    residual = re.compile(r"(?i)\b(password|passcode|pw|pass)\b\s*(?::|=|\bis\b)\s*([^\s,;\"'<>]+)")
+    for row in messages:
+        spoken = SPOKEN_PASSWORD.search(row["text"])
+        if spoken and not spoken.group(1).startswith("[REDACTED"):
+            raise RuntimeError(f"unredacted spoken password in archive message {row['uuid']}")
+        for match in residual.finditer(row["text"]):
+            value = match.group(2)
+            if value.startswith("[REDACTED:"):
+                continue
+            if re.search(r"[0-9]|[^A-Za-z0-9]", value):
+                raise RuntimeError(f"unredacted password-like value in archive message {row['uuid']}")
+        for match in PASSWORD_LIKE.finditer(row["text"]):
+            value = match.group(0)
+            before = row["text"][max(0, match.start() - 80):match.start()]
+            after = row["text"][match.end():match.end() + 80]
+            if is_password_like(value, before, after):
+                raise RuntimeError(f"unredacted password-like token in archive message {row['uuid']}")
+
+
+def voice_messages(chats, sessions):
+    route_path = Path.home() / ".local/state/a0/voice-routes.jsonl"
+    db = Path.home() / "Library/Application Support/SISO Voice/PipelineHistory.sqlite"
+    if not route_path.exists() or not db.exists():
+        return []
+    routed = {}
+    try:
+        with route_path.open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                targets = row.get("to", [])
+                if not isinstance(targets, list):
+                    targets = [targets]
+                for target in targets:
+                    value = str(target).lower()
+                    if "not found" in value:
+                        continue
+                    for sid, info in sessions.items():
+                        if value in info["ids"] or value in info["names"] or any(n and n in value for n in info["names"]):
+                            routed.setdefault(sid, []).append(row.get("at", ""))
+    except OSError:
+        return []
+    if not routed:
+        return []
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    result = []
+    route_times = {}
+    for sid, values in routed.items():
+        for value in values:
+            try:
+                local = dt.datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+                route_times.setdefault(sid, []).append(local.timestamp() - 978307200)
+            except (TypeError, ValueError):
+                continue
+    windows = [(stamp - 90, stamp + 150, sid) for sid, stamps in route_times.items() for stamp in stamps]
+    if not windows:
+        con.close()
+        return []
+    try:
+        records = []
+        for low, high, _ in windows:
+            records.extend(con.execute(
+                "select ZTIMESTAMP, ZPOSTPROCESSEDTRANSCRIPT, ZRAWTRANSCRIPT from ZPIPELINEHISTORYENTRY where ZTIMESTAMP between ? and ?",
+                (low, high)).fetchall())
+        records = sorted(set(records), key=lambda row: row[0])
+        for stamp, post, raw in records:
+            body = str(post or raw or "").strip()
+            if not body:
+                continue
+            voice_norm = norm(body)
+            eligible = {sid for low, high, sid in windows if low <= float(stamp) <= high}
+            best_session = None
+            best_score = 0.0
+            for sid in eligible:
+                for text in sessions.get(sid, {}).get("texts", []):
+                    source_norm = norm(text)
+                    if min(len(source_norm), len(voice_norm)) < 20:
+                        continue
+                    if source_norm == voice_norm:
+                        score = 1.0
+                    else:
+                        matcher = difflib.SequenceMatcher(None, source_norm, voice_norm)
+                        score = matcher.ratio() if matcher.quick_ratio() > .9 else 0.0
+                    if score > best_score:
+                        best_session, best_score = sid, score
+            if best_session is None or best_score < .9:
+                continue
+            unix = float(stamp) + 978307200
+            iso = dt.datetime.fromtimestamp(unix, TZ).isoformat(timespec="seconds")
+            safe, nredact, kinds = redact(clean_text(body))
+            if safe:
+                result.append({"at": iso, "session": best_session, "source": "voice", "text": safe,
+                               "chars": len(safe), "redactions": nredact, "redaction_kinds": kinds,
+                               "uuid": f"voice:{stamp}"})
+    finally:
+        con.close()
+    return result
+
+
+VOICE_TO_MACHINES = {"cmux", "Agent Base", "SISO Internal", "SISO Internal Labs", "oracle-worker", "ChatGPT", "Grok Bot",
+                     "Chat On Steroids", "SISO Code", "Terminal", "iTerm2", "Ghostty", "Warp", "Claude", "Cursor", "Code", "Codex"}
+
+
+def all_voice():
+    """Every SISO Voice note he has spoken, into any app (Shaan, 4 Oct: "check my voice app every word i have ever said is on
+    there" · "take all whatsapp and arc and browswer might be useful"). The archive never leaves this laptop (gitignored);
+    notes spoken into messaging apps are tagged private so nothing copies them into git, specs or logs."""
+    db = Path.home() / "Library/Application Support/SISO Voice/PipelineHistory.sqlite"
+    if not db.exists():
+        return []
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    out = []
+    try:
+        rows = con.execute("select ZID, ZTIMESTAMP, ZCONTEXTAPPNAME, ZCONTEXTWINDOWTITLE, ZPOSTPROCESSEDTRANSCRIPT, ZRAWTRANSCRIPT "
+                           "from ZPIPELINEHISTORYENTRY order by ZTIMESTAMP").fetchall()
+    finally:
+        con.close()
+    for zid, stamp, app, title, post, raw in rows:
+        app = (app or "").replace("\u200e", "").strip()
+        body = str(post or raw or "").strip()
+        if not body or stamp is None:
+            continue
+        at = dt.datetime.fromtimestamp(float(stamp) + 978307200, TZ).isoformat(timespec="seconds")
+        safe, nredact, kinds = redact(body)
+        try:
+            verify_password_redactions([{"text": safe, "uuid": str(zid)}])
+        except RuntimeError:
+            continue
+        private = app not in VOICE_TO_MACHINES and app.lower() in ("whatsapp", "messages", "telegram", "signal", "mail", "slack", "discord")
+        out.append({"at": at, "session": "voice", "source": "voice-private" if private else "voice", "to": f"{app}: {(title or '')[:60]}".strip(": "),
+                    "text": safe, "chars": len(safe), "redactions": nredact, "redaction_kinds": kinds, "uuid": f"voice:{zid}"})
+    return out
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def build():
+    chats, sessions, source_stats = collect_chats()
+    if ALL_AGENTS:  # his voice notes too; a note that also arrived as a chat message is kept once (the chat, which knows the agent)
+        said = {norm(c["text"])[:80] for c in chats}
+        voice = [v for v in all_voice() if norm(v["text"])[:80] not in said]
+        chats = chats + voice
+        source_stats["SISO Voice"] = {"sessions_read": 1, "messages_kept": len(voice)}
+        # his words kept inside projects (.agents/source/, *verbatim*.md): listed once here so recall reads them in place
+        found = subprocess.run(["find", str(Path.home() / "SISO_Workspace"), "-maxdepth", "8", "(", "-name", "node_modules", "-o",
+                                "-name", "_archive", "-o", "-name", "_reference", "-o", "-name", ".git", ")", "-prune", "-o",
+                                "-type", "f", "(", "-path", "*/.agents/source/*.md", "-o", "-iname", "*verbatim*.md", ")", "-print"],
+                               capture_output=True, text=True).stdout.split("\n")
+        (OUT / "project-sources.txt").parent.mkdir(parents=True, exist_ok=True)
+        (OUT / "project-sources.txt").write_text("\n".join(sorted(f for f in found if f)) + "\n")
+    dropped_count, kept_count = filter_self_test(chats)
+    redaction_self_test()
+    voices = voice_messages(chats, sessions)
+    for row in voices:
+        folder = sessions.get(row["session"], {}).get("folder")
+        if folder:
+            source_stats[folder].setdefault("voice_messages_kept", 0)
+            source_stats[folder]["voice_messages_kept"] += 1
+    messages = chats + voices
+    unique = {}
+    for row in messages:
+        unique.setdefault(row["uuid"] or (row["at"], row["session"], row["text"]), row)
+    messages = sorted(unique.values(), key=lambda row: (row["at"], row["session"], row["uuid"]))
+    verify_password_redactions(messages)
+    by_day = {}
+    for row in messages:
+        day = row["at"][:10]
+        by_day.setdefault(day, []).append(row)
+    OUT.mkdir(parents=True, exist_ok=True)
+    raw_dir = OUT / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    (raw_dir / ".gitignore").write_text("*\n!.gitignore\n")
+    days = []
+    for day in sorted(by_day, reverse=True):
+        rows = by_day[day]
+        output = []
+        for number, row in enumerate(rows, 1):
+            output.append({"id": f"{day}-{number:03d}", "at": row["at"], "session": row["session"],
+                           "source": row["source"], "to": row.get("to", "agent-zero"), "text": row["text"], "chars": row["chars"]})
+        raw_dir.joinpath(day + ".jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in output))
+        counts = {}
+        for row in rows:
+            for kind, count in row["redaction_kinds"].items():
+                counts[kind] = counts.get(kind, 0) + count
+        days.append({"day": day, "count": len(rows), "chars": sum(r["chars"] for r in rows),
+                     "first_at": rows[0]["at"], "last_at": rows[-1]["at"], "redactions": sum(counts.values()),
+                     "preview": output[0]["text"][:120]})
+    keep = {f"{row['day']}.jsonl" for row in days}
+    for old in raw_dir.glob("*.jsonl"):
+        if old.name not in keep:
+            old.unlink()
+    updated = messages[-1]["at"] if messages else ""
+    write_json(OUT / "index.json", {"updated": updated, "days": days, "total": len(messages)})
+    (OUT / "distilled").mkdir(exist_ok=True)
+    print(f"built {len(messages)} messages across {len(days)} days; redactions={sum(d['redactions'] for d in days)}")
+    print(f"filter self-test passed: dropped={dropped_count} non-Shaan samples; kept={kept_count} real archive messages")
+    print("redaction self-test passed: spoken and password-like values redacted; emails, paths, hashes, versions, and ordinary words preserved")
+    for day in sorted(by_day, reverse=True):
+        kinds = {}
+        for row in by_day[day]:
+            for kind, count in row["redaction_kinds"].items():
+                kinds[kind] = kinds.get(kind, 0) + count
+        if kinds:
+            print(f"redactions_by_day day={day} " + " ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())))
+    for folder, counts in sorted(source_stats.items()):
+        print(f"source_folder={folder} sessions_read={counts['sessions_read']} chat_messages_kept={counts['messages_kept']} voice_messages_kept={counts.get('voice_messages_kept', 0)} password_labelled_secret_output_filtered={counts.get('password_labelled_secret_output_filtered', 0)}")
+
+
+def load_day(day):
+    path = OUT / "raw" / f"{day}.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def day_cmd(day):
+    for row in load_day(day):
+        print(json.dumps(row, ensure_ascii=False))
+
+
+def search(terms, max_days=None):
+    needles = norm(terms).split()
+    index = json.loads((OUT / "index.json").read_text())
+    days = index["days"][:max_days] if max_days else index["days"]
+    found = 0
+    for info in days:
+        for row in load_day(info["day"]):
+            text = norm(row["text"])
+            if all(word in text for word in needles):
+                snippet = re.sub(r"\s+", " ", row["text"])
+                print(f"{row['id']} {snippet[:160]}")
+                found += 1
+    if not found:
+        print("no matches")
+
+
+def coverage():
+    raw_ids = set()
+    for path in sorted((OUT / "raw").glob("*.jsonl")):
+        raw_ids.update(row["id"] for row in (json.loads(line) for line in path.read_text().splitlines() if line))
+    cited = set()
+    for path in (OUT / "distilled").glob("*.md"):
+        cited.update(re.findall(r"\[([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+)\]", path.read_text()))
+    missing = sorted(raw_ids - cited)
+    for item in missing:
+        print(item)
+    print(f"uncited={len(missing)} total={len(raw_ids)}")
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1:] == ["build", "--all"]:
+        os.environ["A0_TRANSCRIPT_ALL"] = "1"
+        globals()["ALL_AGENTS"] = True
+        return build()
+    if len(argv) == 2 and argv[1] == "build":
+        build()
+    elif len(argv) == 3 and argv[1] == "day":
+        day_cmd(argv[2])
+    elif len(argv) >= 3 and argv[1] == "search":
+        args = argv[2:]
+        max_days = None
+        if "--days" in args:
+            ix = args.index("--days")
+            max_days = int(args[ix + 1])
+            args = args[:ix] + args[ix + 2:]
+        search(" ".join(args), max_days)
+    elif len(argv) == 2 and argv[1] == "coverage":
+        coverage()
+    else:
+        print(__doc__.splitlines()[0], file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

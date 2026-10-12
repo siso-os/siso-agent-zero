@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""recall: search everything Agent Zero knows, most trusted layer first.
+
+Shaan, 4 Oct 2026: "your own personal library of docs ... and your infrastructure, because this is where you're gonna live and
+work". Plain files and grep, on purpose (research/agent-zero-v2: files beat databases at our size; add an index only after a
+measured miss).
+
+  recall <words...>            every line holding all the words, grouped by layer, newest words first
+  recall <words...> -n 5       at most 5 hits per layer (default 4)
+  recall <words...> --json
+
+Layers, in the order they are trusted: his words (memos and every chat message, mid-turn ones too), memory, the live state
+files (routing, projects, renewals), the checkpoint, the map and principles, research findings, docs and maps, jobs, tasks,
+then superseded history last.
+"""
+import glob, json, os, re, sys
+
+HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+LAYERS = [
+    ("his words (chat)", [".agents/a0/transcript/raw/*.jsonl"]),
+    ("his words (memos)", ["words/source/*.md", "words/*.md"]),
+    ("his words (in projects)", ["@.agents/a0/transcript/project-sources.txt"]),
+    ("memory", [".agents/memory/*.md"]),
+    ("state", ["routing.json", "projects.json", "bin/renewals.json"]),
+    ("checkpoint", [".agents/HANDOFF.md"]),
+    ("map and principles", ["AGENTS.md", "PRINCIPLES.md", "docs/HOW-TO-WORK-WITH-AGENT-ZERO.md", "docs/HOUSE.md", "docs/ELON-PASS.md"]),
+    ("research", ["research/*/FINDINGS.md", "research/*/*.md"]),
+    ("docs", ["docs/maps/*.md", "docs/evidence/**/*.md"]),
+    ("jobs", ["jobs/*.md", "jobs/*.out"]),
+    ("tasks", ["tasks/*.json"]),
+    ("his words (corpus)", ["words/corpus/*.md"]),
+    ("history (superseded)", [".agents/HANDOFF-HISTORY.md"]),
+]
+
+
+def aliases():
+    try:
+        d = json.load(open(os.path.join(HOME, "docs/voice-aliases.json")))
+    except (OSError, ValueError):
+        return {}
+    return {k: [k] + v for k, v in d.items() if not k.startswith("_")}
+
+
+def variants(term, table):
+    """Every spelling of one search term: itself, a singular form, and how his voice transcription writes it."""
+    out = {term, term.rstrip("s")}
+    for key, spellings in table.items():
+        if term.rstrip("s") in (key, key + "s") or term in spellings:
+            out |= set(spellings)
+    return [v for v in out if v]
+
+
+def files_for(pat):
+    if pat.startswith("@"):  # a list of paths written by `a0-transcript build --all` (globbing the whole estate takes ~30 s)
+        try:
+            return [l.strip() for l in open(os.path.join(HOME, pat[1:])) if l.strip()]
+        except OSError:
+            return []
+    found = glob.glob(os.path.expanduser(pat) if pat.startswith("~") else os.path.join(HOME, pat), recursive=True)
+    dated = all(re.match(r"\d{4}-\d\d-\d\d", os.path.basename(f)) for f in found)
+    return sorted(found, reverse=True) if dated else sorted(found, key=os.path.getmtime, reverse=True)
+
+
+def render(f, line):
+    if f.endswith(".jsonl"):
+        try:
+            row = json.loads(line)
+            to = f" to {row['to']}" if row.get("to") and row.get("to") != "agent-zero" else ""
+            return f"{row.get('at', '')[:16]}{to} {row.get('text', '')}"
+        except ValueError:
+            return line
+    if f.endswith(".json") and "/tasks/" in f:
+        try:
+            row = json.load(open(f)); return f"{row.get('id')} [{row.get('stage')}] {row.get('title')}"
+        except ValueError:
+            return line
+    return line
+
+
+def hits(pattern_files, terms, phrases, limit):
+    """Lines holding the whole phrase first (any of his spellings), then lines holding every word."""
+    files = []
+    for pat in pattern_files:
+        files += [f for f in files_for(pat) if f not in files and not f.endswith("INDEX.json")]
+    exact, loose = [], []
+    for f in files:
+        try:
+            lines = open(f, errors="ignore").read().splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            low = line.lower()
+            if not all(any(v in low for v in t) for t in terms):
+                continue
+            hit = {"path": os.path.relpath(f, HOME), "line": i, "text": re.sub(r"\s+", " ", render(f, line)).strip()[:240]}
+            (exact if any(p in low for p in phrases) else loose).append(hit)
+            if len(exact) >= limit:
+                return exact
+            if f.endswith(".json"):
+                break
+    return (exact + loose)[:limit]
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip()); return 0 if argv else 2
+    limit = int(argv[argv.index("-n") + 1]) if "-n" in argv else 4
+    words = [a for i, a in enumerate(argv) if not a.startswith("-") and (i == 0 or argv[i - 1] != "-n")]
+    table = aliases()
+    terms = [variants(w.lower(), table) for w in words]
+    phrase = " ".join(words).lower()
+    phrases = {phrase, phrase.rstrip("s")} | {s for k, v in table.items() if phrase.rstrip("s") in (k, k + "s") for s in v}
+    found = [(name, hits(pats, terms, phrases, limit)) for name, pats in LAYERS]
+    if "--json" in argv:
+        print(json.dumps({name: h for name, h in found if h}, indent=1)); return 0
+    total = 0
+    for name, h in found:
+        if not h:
+            continue
+        total += len(h)
+        print(f"== {name}")
+        for x in h:
+            print(f"  {x['path']}:{x['line']}  {x['text']}")
+    if not total:
+        print(f"recall: nothing holds all of: {' '.join(words)}  (try fewer words)")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

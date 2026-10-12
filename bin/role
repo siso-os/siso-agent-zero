@@ -1,0 +1,41 @@
+#!/bin/sh
+# role: the infrastructure roles (estate, health, efficiency): a role file (roles/<name>.md) is the personality, a ledger
+# (roles/<name>.jsonl) is what it actually achieved. Each role is a standing Codex chat in Agent Base (Shaan, 4 Oct: "we shouldn't
+# be running bare codex jobs ... so we can like message"): he opens it from Agent Infrastructure and types to it; a run is one
+# turn Agent Zero sends into that chat. No pings between agents, no lock.
+#   role                 each role: its last run, its number before -> after, what it did
+#   role start <name>    start its chat (once; launchd keeps it alive and resumes it): Sol 6.1, effort high, in its home repo
+#   role run <name>      one run now (background it); appends to the ledger from the RETURN's NUMBER line
+#   role own <name> [N]  the owner: up to N runs back to back (default 4), stopping early when two runs in a row change nothing
+set -eu
+Z="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = own ]; then
+  n="${2:?role}"; max="${3:-4}"; still=0; i=0
+  while [ $i -lt "$max" ] && [ $still -lt 2 ]; do i=$((i+1)); before=$(tail -1 "$Z/roles/$n.jsonl" 2>/dev/null | python3 -c "import json,sys;print(json.loads(sys.stdin.read() or '{}').get('changed'))" 2>/dev/null)
+    "$0" run "$n" >/dev/null; last=$(tail -1 "$Z/roles/$n.jsonl"); echo "$last" | grep -q '"changed": null\|nothing\|no processes stopped' && still=$((still+1)) || still=0; done
+  echo "$n: $i runs"; exit 0; fi
+AB="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host-service"
+CHAT() { printf %s "$1" | tr '[:lower:]' '[:upper:]'; }
+HOMEOF() { h=$(sed -n 's/^\*\*Home:\*\* \(~[^ ]*\).*/\1/p' "$Z/roles/$1.md" | head -1); eval echo "$h"; }
+if [ "${1:-}" = start ]; then
+  n="${2:?role}"; model=$(python3 -c "import json;print(json.load(open('$Z/routing.json')).get('roles_model','gpt-6.1-sol'))" 2>/dev/null || echo gpt-6.1-sol)
+  exec "$AB" install --harness codex --name "$(CHAT "$n")" --label "com.siso.host-$(CHAT "$n")" --model "$model" --effort high --cwd "$(HOMEOF "$n")"; fi
+if [ "${1:-}" != run ]; then
+  for f in "$Z"/roles/*.md; do n=$(basename "$f" .md); l=$(tail -1 "$Z/roles/$n.jsonl" 2>/dev/null || true)
+    printf '%-10s %s\n' "$n" "${l:-never run}" | cut -c1-220; done; exit 0; fi
+n="${2:?role name}"; f="$Z/roles/$n.md"; [ -f "$f" ] || { echo "no role $n"; exit 2; }
+b=$(mktemp); { echo "TASK: role-$n ($(date '+%-d %b %Y %H:%M'))"; echo; cat "$f"; echo; echo "## Your last runs (ledger)"; tail -5 "$Z/roles/$n.jsonl" 2>/dev/null || echo "none yet";
+  echo; echo "Do real work this run: measure your number first, do the work, measure again. Keep a list of what you changed (paths, commands)."
+  echo "End your reply with three lines exactly: STATUS: done|blocked — <one line>; NUMBER: <name of number> <before> -> <after>; CHANGED: <what, paths>"; } > "$b"
+out="$Z/roles/.last-$n.out"; rc=0; "$AB" send --name "$(CHAT "$n")" --prompt-file "$b" --timeout 5400 > "$out" 2>&1 || rc=$?
+[ $rc = 2 ] && echo "STATUS: blocked — its chat is not running (role start $n)" >> "$out"
+[ $rc = 3 ] && echo "STATUS: still working after 90 min (see its chat)" >> "$out"
+python3 - "$Z/roles/$n.jsonl" "$out" <<'PY'
+import json, sys, datetime, re
+t = open(sys.argv[2], errors="ignore").read()
+num = re.search(r"NUMBER:\s*(.+)", t); st = re.search(r"STATUS:\s*(.+)", t); ch = re.search(r"CHANGED:\s*(.+)", t)
+open(sys.argv[1], "a").write(json.dumps({"at": datetime.datetime.now().astimezone().isoformat(timespec="minutes"),
+  "number": num.group(1).strip() if num else None, "status": st.group(1).strip()[:200] if st else "no RETURN",
+  "changed": ch.group(1).strip()[:300] if ch else None}) + "\n")
+PY
+rm -f "$b"; [ "$n" = scout ] && { "$Z/bin/research-sync" >/dev/null 2>&1 || true; }; tail -1 "$Z/roles/$n.jsonl"

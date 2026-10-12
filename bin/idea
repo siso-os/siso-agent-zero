@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""idea: Agent Zero's idea farm, one file (ideas/ideas.jsonl), one line per idea.
+
+Shaan, 4 Oct 2026 ~04:40: "an idea farm for the agent zero so you've got my ideas at the top as training data and ones we've integrated
+and haven't integrated yet ... souls looking at certain stuff figuring out ideas and ... noting them down and then ranking them and then
+if i look at them and approve them and think they're cool then like we can add them in".
+
+  idea                       his ideas first (training data), then the others ranked by score
+  idea add "TEXT" [--by Shaan|A0|<reader>] [--his "his words"] [--score N] [--why "..."]
+  idea approve ID            his yes: it becomes a task (a0-task add), status approved
+  idea integrated ID [--task t-NNNN]   it is live
+  idea reject ID [--why "..."]
+  idea --json
+Statuses: new -> approved -> integrated, or rejected. Scores 1-10 are a reader's rank against his ideas; his own have none.
+"""
+import datetime as dt, json, os, subprocess, sys
+
+HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+F = os.path.join(HOME, "ideas", "ideas.jsonl")
+
+
+def load():
+    return [json.loads(l) for l in open(F) if l.strip()] if os.path.exists(F) else []
+
+
+def save(rows):
+    os.makedirs(os.path.dirname(F), exist_ok=True)
+    tmp = F + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    os.replace(tmp, F)
+
+
+def flag(argv, name, default=None):
+    return argv[argv.index(name) + 1] if name in argv else default
+
+
+def main(argv):
+    rows = load()
+    cmd = argv[0] if argv and not argv[0].startswith("--") else "ls"
+    if cmd == "add":
+        n = max([int(r["id"][2:]) for r in rows] or [0]) + 1
+        by = flag(argv, "--by", "A0")
+        r = {"id": f"i-{n:03d}", "text": argv[1], "by": by, "his": flag(argv, "--his"), "why": flag(argv, "--why"),
+             "score": float(flag(argv, "--score")) if flag(argv, "--score") else None, "status": "new",
+             "at": dt.datetime.now().astimezone().isoformat(timespec="minutes"), "task": None}
+        rows.append(r); save(rows); print(r["id"]); return 0
+    if cmd in ("approve", "integrated", "reject"):
+        r = next((x for x in rows if x["id"] == argv[1]), None)
+        if not r:
+            print(f"no idea {argv[1]}"); return 2
+        if cmd == "approve":
+            out = subprocess.run([os.path.join(HOME, "bin/a0-task"), "add", r["text"][:200], "--project", flag(argv, "--project", "Agent Base"),
+                                  "--his", r.get("his") or "approved from the idea farm"], capture_output=True, text=True).stdout.strip().splitlines()
+            r.update(status="approved", task=out[-1] if out else None)
+        elif cmd == "integrated":
+            r.update(status="integrated", task=flag(argv, "--task", r.get("task")))
+        else:
+            r.update(status="rejected", why=flag(argv, "--why", r.get("why")))
+        r["updated"] = dt.datetime.now().astimezone().isoformat(timespec="minutes")
+        save(rows); print(f"{r['id']} {r['status']}" + (f" -> {r['task']}" if r.get("task") else "")); return 0
+    if "--json" in argv:
+        print(json.dumps(rows, indent=1)); return 0
+    his = [r for r in rows if r["by"] == "Shaan"]
+    rest = sorted([r for r in rows if r["by"] != "Shaan" and r["status"] != "rejected"], key=lambda r: -(r.get("score") or 0))
+    mark = {"new": "○", "approved": "◐", "integrated": "●", "rejected": "×"}
+    print(f"== His ideas ({sum(r['status'] == 'integrated' for r in his)} of {len(his)} integrated)")
+    for r in his:
+        print(f"  {mark[r['status']]} {r['id']} {r['text'][:110]}" + (f"  [{r['task']}]" if r.get("task") else ""))
+    print(f"== Farmed ideas, ranked ({len(rest)})")
+    for r in rest:
+        print(f"  {mark[r['status']]} {r['id']} {r.get('score') or '-':>4} {r['text'][:100]}  ({r['by']})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,26 @@
+#!/bin/sh
+# waitfor: block until one thing is finished, then print one line about it. Run it in the background; its exit wakes you.
+# Measured 4 Oct: Agent Zero hand-wrote 55 until-loops in one session. One command instead.
+#
+#   waitfor queue <id>      an Agent Base ship-queue item reaches live, rollback, failure, conflict or a held deploy
+#   waitfor job <name>      jobs/<name>.out in the Agent Zero repo is written (a codex-run job finished)
+#   waitfor fleet <name>    a fleet has no job running or queued
+#   waitfor pid <pid>       a process exits
+#   [--timeout SECONDS]     default 3600
+set -eu
+kind="${1:?queue|job|fleet|pid}"; what="${2:?what to wait for}"; limit=3600
+[ "${3:-}" = "--timeout" ] && limit="${4:?seconds}"
+here="$(cd "$(dirname "$0")/.." && pwd)"; q="$HOME/.local/state/agent-base/ship-queue/queue.jsonl"
+end=$(( $(date +%s) + limit ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  case "$kind" in
+    queue) s=$(grep "\"$what\"" "$q" | tail -1)
+           case "$s" in *'"live"'*|*'rolled back'*|*'"failed"'*|*'conflict'*|*'deploy held'*|*'deploy failed'*|*'"dropped"'*) echo "$s" | cut -c1-400; exit 0;; esac ;;
+    job)   [ -s "$here/jobs/$what.out" ] && { grep -m1 -i "^STATUS" "$here/jobs/$what.out" || tail -1 "$here/jobs/$what.out"; exit 0; } ;;
+    fleet) fleet status "$what" 2>/dev/null | head -1 | grep -q " 0 running, 0 queued" && { fleet status "$what" | head -1; exit 0; } ;;
+    pid)   kill -0 "$what" 2>/dev/null || { echo "pid $what exited"; exit 0; } ;;
+    *)     echo "waitfor: unknown kind $kind" >&2; exit 2 ;;
+  esac
+  sleep 15
+done
+echo "waitfor: $kind $what still not finished after ${limit}s"; exit 1

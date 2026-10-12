@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""a0-task: persistent task records and the generated Agent Zero plan view.
+
+Usage: a0-task <add|move|set|show|list|index|seed> [arguments]
+Stores one JSON file per task under tasks/ and rebuilds INDEX.json.
+`index` also regenerates .agents/A0-plan.json; `seed` imports its existing
+items and the asks captured at .agents/a0/pages/asks/asks.json.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TASKS = ROOT / "tasks"
+INDEX = TASKS / "INDEX.json"
+PLAN = ROOT / ".agents/A0-plan.json"  # generated view, read only by the Agent Base hub
+ASKS = ROOT / ".agents/a0/pages/asks/asks.json"
+STAGES = ("thought", "specced", "allocated", "building", "built", "tested", "preview",
+          "live", "feedback", "happy", "rework", "dropped")
+STAGE_ALIASES = {"integrated": "live"}  # 2 Oct redesign: "on preview" and "live" are real stages; old name kept as an alias
+PRIORITIES = ("P0", "P1", "P2", "P3")
+EVIDENCE_STAGES = {"built", "tested", "preview", "live"}
+FEEDBACK_STAGES = {"happy", "rework"}
+PLAN_STATUS = {"thought": "asked", "specced": "specced", "allocated": "allocated",
+               "building": "building", "built": "built", "tested": "checked",
+               "preview": "checked", "live": "checked", "feedback": "checked", "happy": "checked",
+               "rework": "building", "dropped": "dropped"}
+
+
+def now():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def json_bytes(value):
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode()
+
+
+def atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_bytes() == data:
+        return False
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return True
+
+
+def task_path(task_id):
+    if not re.fullmatch(r"(?:a0-\d{3}|t-\d{4,})", task_id):
+        raise ValueError(f"invalid task id: {task_id}")
+    return TASKS / f"{task_id}.json"
+
+
+def read_task(task_id):
+    path = task_path(task_id)
+    if not path.is_file():
+        raise ValueError(f"unknown task: {task_id}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_task(task):
+    atomic_write(task_path(task["id"]), json_bytes(task))
+
+
+def fresh_task(task_id, title, his, project="SISO", priority="P2", stage="thought",
+               owner="A0", agent=None, model=None, intent=None, evidence=None,
+               plan_item=None, note="created"):
+    stamp = now()
+    return {"id": task_id, "title": title, "his": his, "intent": intent or [],
+            "project": project, "priority": priority, "stage": stage, "owner": owner,
+            "agent": agent, "model": model,
+            "links": {"spec": None, "plan_item": plan_item, "pr": None, "url": None},
+            "evidence": evidence or [], "feedback": {"at": None, "his": None, "verdict": None},
+            "parent": None, "next": None, "created": stamp, "updated": stamp,
+            "history": [{"at": stamp, "stage": stage, "by": "A0", "note": note}]}
+
+
+def index_data():
+    tasks = [json.loads(path.read_text(encoding="utf-8"))
+             for path in TASKS.glob("*.json") if path.name != "INDEX.json"]
+    tasks.sort(key=lambda t: (t["priority"], t["updated"], t["id"]))
+    stages = Counter(t["stage"] for t in tasks)
+    projects = Counter(t.get("project") or "SISO" for t in tasks)
+    priorities = Counter(t["priority"] for t in tasks)
+    return {"updated": max((t["updated"] for t in tasks), default=""),
+            "counts": {"by_stage": dict(sorted(stages.items())),
+                       "by_project": dict(sorted(projects.items())),
+                       "by_priority": dict(sorted(priorities.items()))},
+            "tasks": [{k: task.get(k) for k in
+                       ("id", "title", "project", "priority", "stage", "owner", "model", "updated")}
+                      for task in tasks]}
+
+
+def plan_view(index):
+    records = [json.loads(task_path(row["id"]).read_text(encoding="utf-8"))
+               for row in index["tasks"]]
+    items = []
+    for task in records:
+        items.append({"id": task["id"], "title": task["title"], "his": task["his"],
+                      "intent": task["intent"], "spec": task["links"].get("spec"),
+                      "status": PLAN_STATUS[task["stage"]],
+                      "to": {"agent": task.get("agent") or task.get("owner") or "A0"},
+                      "evidence": task["evidence"], "parent": task.get("parent"),
+                      "at": task["updated"][:10]})
+    return {"_generated": "Generated from tasks/ by bin/a0-task index. Do not hand-edit.",
+            "owner": "A0", "project": "SISO", "domain": "Agent Zero: priorities, owners, the org",
+            "updated": index["updated"], "items": items}
+
+
+def rebuild(write_plan=True):
+    index = index_data()
+    atomic_write(INDEX, json_bytes(index))
+    if write_plan:
+        atomic_write(PLAN, json_bytes(plan_view(index)))
+    return index
+
+
+def append_history(task, note, by="A0"):
+    stamp = now()
+    task["updated"] = stamp
+    task["history"].append({"at": stamp, "stage": task["stage"], "by": by, "note": note})
+
+
+def valid_new_stage(task, stage, evidence=None, his=None):
+    stage = STAGE_ALIASES.get(stage, stage)
+    if stage not in STAGES:
+        raise ValueError(f"invalid stage: {stage}")
+    evidence = evidence or []
+    if stage in EVIDENCE_STAGES and not evidence:
+        raise ValueError(f"stage {stage} requires new --evidence")
+    if stage in FEEDBACK_STAGES and not (his or task["feedback"].get("his")):
+        raise ValueError(f"stage {stage} requires --his (captain's words)")
+    if stage == "dropped" and not (his or task.get("next") or task["history"]):
+        raise ValueError("stage dropped requires a note")
+
+
+def priority_of(value):
+    return value if value in PRIORITIES else "P2"
+
+
+def inferred_project(landed):
+    value = landed.lower()
+    for terms, project in (("halo", "HALO"), ("agent base", "Agent Base"),
+                           ("stream", "Streaming"), ("efficien", "Efficiency"),
+                           ("estate", "Estate")):
+        if any(term in value for term in terms.split()):
+            return project
+    return "SISO"
+
+
+def ask_priority(row, project):
+    text = (row.get("words", "") + " " + row.get("landed", "")).lower()
+    return "P1" if project in {"Agent Base", "HALO", "Streaming"} or any(
+        term in text for term in ("browser", "face", "streaming go-live", "stream go-live")) else "P2"
+
+
+def title_from_words(words):
+    text = re.sub(r"^\s*[\"'“]|[\"'”]\s*$", "", str(words)).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:100].rstrip(" .,;") or "Untitled ask"
+
+
+def seed():
+    plan = json.loads(PLAN.read_text(encoding="utf-8"))
+    existing = {path.stem for path in TASKS.glob("*.json") if path.name != "INDEX.json"}
+    for item in plan.get("items", []):
+        task_id = item["id"]
+        if not re.fullmatch(r"a0-\d{3}", task_id):
+            continue
+        if task_id in existing:
+            continue
+        old_status = item.get("status", "asked")
+        stage = {"asked": "thought", "specced": "specced", "allocated": "allocated",
+                 "building": "building", "built": "built", "checked": "tested"}.get(old_status, "thought")
+        evidence = list(item.get("evidence") or [])
+        if stage in EVIDENCE_STAGES and not evidence:
+            stage = "building"
+        target = item.get("to")
+        agent = target.get("agent") if isinstance(target, dict) else target
+        task = fresh_task(task_id, item.get("title", task_id), item.get("his", ""),
+                          project=plan.get("project", "SISO"), priority="P2", stage=stage,
+                          owner=plan.get("owner", "A0"), agent=agent, intent=item.get("intent") or [],
+                          evidence=evidence, plan_item=task_id, note="seeded from .agents/plan/A0.json")
+        task["parent"] = item.get("parent")
+        task["links"]["spec"] = item.get("spec")
+        save_task(task)
+        existing.add(task_id)
+
+    priority_one = ("agent base", "browser", "halo face", "streaming go-live", "stream go-live")
+    all_asks = json.loads(ASKS.read_text(encoding="utf-8"))
+    seeded_asks = {}
+    for path in TASKS.glob("*.json"):
+        if path.name == "INDEX.json":
+            continue
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        for event in saved.get("history", []):
+            match = re.fullmatch(r"seeded from captured relay ask row (\d+)", event.get("note", ""))
+            if match:
+                seeded_asks[int(match.group(1))] = saved["id"]
+    for ask_number, ask in enumerate(all_asks, 1):
+        words, landed = ask.get("words", ""), ask.get("landed", "")
+        if ask_number in seeded_asks:
+            continue
+        linked = next((candidate for candidate in re.findall(r"\ba0-0\d{2}\b", landed)
+                       if candidate in existing), None)
+        if linked:
+            task = read_task(linked)
+            if words not in task["his"]:
+                task["his"] = (task["his"] + "\n\n" + words).strip()
+                append_history(task, "appended linked relay ask")
+                save_task(task)
+            continue
+        # Older seed records predate row markers; match their exact source words once.
+        prior = next((path for path in TASKS.glob("t-*.json")
+                      if json.loads(path.read_text(encoding="utf-8")).get("his") == words), None)
+        if prior:
+            continue
+        next_id = ask_number
+        while f"t-{next_id:04d}" in existing:
+            next_id += 1
+        project = inferred_project(landed)
+        priority = "P1" if project in {"Agent Base", "HALO", "Streaming"} or any(
+            term in (words + " " + landed).lower() for term in priority_one) else "P2"
+        status = ask.get("status", "")
+        stage = {"Done (with proof)": "tested", "Being built": "building",
+                 "Handed out, not started": "allocated", "Dropped or misread": "thought"}.get(status, "thought")
+        evidence = [landed] if stage == "tested" else []
+        task = fresh_task(f"t-{next_id:04d}", title_from_words(words), words,
+                          project=project, priority=priority, stage=stage, owner="A0",
+                          evidence=evidence, note=f"seeded from captured relay ask row {ask_number}")
+        if status == "Dropped or misread":
+            task["history"][-1]["note"] = "dropped or misread in relay audit; needs re-triage"
+        save_task(task)
+        existing.add(task["id"])
+    index = rebuild()
+    print(f"seeded {len(index['tasks'])} tasks")
+
+
+def cmd_add(args):
+    index = index_data()
+    numbers = [int(match.group(1)) for row in index["tasks"]
+               if (match := re.fullmatch(r"t-(\d+)", row["id"]))]
+    task_id = f"t-{max(numbers, default=0) + 1:04d}"
+    if args.priority not in PRIORITIES:
+        raise ValueError(f"invalid priority: {args.priority}")
+    valid_new_stage({"feedback": {"his": None}, "history": [{}], "next": None}, args.stage)
+    task = fresh_task(task_id, args.title, args.his, args.project, args.priority, args.stage,
+                      args.owner, None, args.model, args.intent, note="created by add")
+    save_task(task)
+    rebuild(write_plan=False)
+    print(task_id)
+
+
+def cmd_move(args):
+    task = read_task(args.id)
+    evidence = [args.evidence] if args.evidence else []
+    valid_new_stage(task, args.stage, evidence, args.his)
+    task["stage"] = args.stage
+    task["evidence"].extend(evidence)
+    if args.stage in FEEDBACK_STAGES and args.his:
+        task["feedback"] = {"at": now(), "his": args.his,
+                            "verdict": "happy" if args.stage == "happy" else "rework"}
+    append_history(task, args.note or f"moved to {args.stage}", args.by)
+    save_task(task)
+    rebuild(write_plan=False)
+    print(f"{args.id}: {args.stage}")
+
+
+def cmd_set(args):
+    task = read_task(args.id)
+    allowed = {"owner", "agent", "model", "priority", "project", "links.spec",
+               "links.plan_item", "links.pr", "links.url", "links.source", "links.brief",
+               "next", "parent"}
+    for assignment in args.fields:
+        if "=" not in assignment:
+            raise ValueError(f"expected field=value: {assignment}")
+        field, value = assignment.split("=", 1)
+        if field not in allowed:
+            raise ValueError(f"field cannot be set: {field}")
+        if field == "priority" and value not in PRIORITIES:
+            raise ValueError(f"invalid priority: {value}")
+        if field.startswith("links."):
+            task["links"][field.split(".", 1)[1]] = value or None
+        else:
+            task[field] = value or None
+    append_history(task, "set " + ", ".join(x.split("=", 1)[0] for x in args.fields), args.by)
+    save_task(task)
+    rebuild(write_plan=False)
+
+
+def cmd_list(args):
+    rows = index_data()["tasks"]
+    if args.project:
+        rows = [t for t in rows if t["project"].lower() == args.project.lower()]
+    if args.stage:
+        rows = [t for t in rows if t["stage"] == args.stage]
+    if args.priority:
+        rows = [t for t in rows if t["priority"] == args.priority]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        for row in rows:
+            print(f"{row['id']} {row['priority']} {row['stage']} [{row['project']}] {row['title']}")
+
+
+def parser():
+    root = argparse.ArgumentParser(description=__doc__)
+    sub = root.add_subparsers(dest="command", required=True)
+    add = sub.add_parser("add", help="create a task")
+    add.add_argument("title")
+    add.add_argument("--his", required=True)
+    add.add_argument("--project", default="SISO")
+    add.add_argument("--priority", default="P2")
+    add.add_argument("--stage", default="thought", choices=STAGES)
+    add.add_argument("--owner", default="A0")
+    add.add_argument("--model")
+    add.add_argument("--intent", action="append", default=[])
+    add.set_defaults(run=cmd_add)
+    move = sub.add_parser("move", help="move a task through the flywheel")
+    move.add_argument("id")
+    move.add_argument("stage", choices=STAGES)
+    move.add_argument("--evidence")
+    move.add_argument("--his")
+    move.add_argument("--note")
+    move.add_argument("--by", default="A0")
+    move.set_defaults(run=cmd_move)
+    setting = sub.add_parser("set", help="set task fields")
+    setting.add_argument("id")
+    setting.add_argument("fields", nargs="+")
+    setting.add_argument("--by", default="A0")
+    setting.set_defaults(run=cmd_set)
+    show = sub.add_parser("show", help="show one task")
+    show.add_argument("id")
+    show.set_defaults(run=lambda a: print(json.dumps(read_task(a.id), ensure_ascii=False, indent=2)))
+    listing = sub.add_parser("list", help="list task summaries")
+    listing.add_argument("--project")
+    listing.add_argument("--stage", choices=STAGES)
+    listing.add_argument("--priority", choices=PRIORITIES)
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(run=cmd_list)
+    idx = sub.add_parser("index", help="rebuild index and A0.json view")
+    idx.set_defaults(run=lambda a: (rebuild(), print("rebuilt INDEX.json and A0.json")))
+    sd = sub.add_parser("seed", help="idempotently import A0.json and captured asks")
+    sd.set_defaults(run=lambda a: seed())
+    return root
+
+
+def main():
+    args = parser().parse_args()
+    try:
+        args.run(args)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"a0-task: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

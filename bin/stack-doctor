@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""stack-doctor: every agent-stack rule checked in seconds, red / amber / green, so "the system is fucked" becomes a list.
+
+Shaan, 3 Oct ~19:00: "now we need to look at agent stack functionality because this whole shit's been fucked ... We gotta
+fix the systems before we can continue on. With anything." Each check reads the real thing (processes, transcripts, config,
+live endpoints); none trusts a flag. Rules come from the brain (siso-harness-lab/brain) and the 3 Oct org redesign
+(siso-firstmate .agents/a0/specs/2026-10-03-stack-first-principles/).
+
+  stack-doctor [--json] [--hours H]     exit 0 = no red, 1 = at least one red
+"""
+import argparse, glob, json, os, re, subprocess, time, urllib.request
+
+HOME = os.path.expanduser("~")
+WS = os.path.join(HOME, "SISO_Workspace")
+AB = os.path.join(WS, "SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base")
+CLAUDE_OK = re.compile(r"^(claude-(opus-5-5|sonnet-5-5|fable-5-1|haiku-4-5)|<synthetic>)")
+CODEX_OK = {"gpt-6-luna", "gpt-6.1-sol", "codex-auto-review"}
+CLAUDE_ROOTS = [HOME + "/.claude", HOME + "/.claude-siso", HOME + "/.config/claude-siso-3"]
+BANNED_LOGINS = {HOME + "/.claude-siso": "fuzeheritage (Claude Code disabled by its org)", HOME + "/.config/claude-fahmy": "Fahmy's login"}
+CAP, OWNER_CAP, CODEX_CAP = 300_000, 500_000, 450_000
+
+out = []
+
+
+def add(level, name, msg):
+    out.append({"level": level, "check": name, "msg": msg})
+
+
+def sh(*a, timeout=10):
+    try:
+        return subprocess.run(a, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def recent(pattern, hours):
+    cut = time.time() - hours * 3600
+    return [f for f in glob.glob(pattern, recursive=True) if os.path.getmtime(f) >= cut]
+
+
+def tail_lines(path, n=400_000):
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - n))
+        return f.read().decode("utf-8", "ignore").splitlines()
+
+
+def claude_processes():
+    pids = sh("pgrep", "-f", r"\.local/share/claude/versions/").split()
+    rows = []
+    for p in pids:
+        env = sh("ps", "eww", "-o", "command=", "-p", p)
+        cfg = (re.search(r"CLAUDE_CONFIG_DIR=(\S+)", env) or [None, HOME + "/.claude"])[1]
+        auto = re.search(r"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=(\S+)", env)
+        rows.append({"pid": p, "config": cfg, "autocompact": auto[1] if auto else None})
+    names = {}
+    try:
+        for a in json.loads(sh("herdr", "agent", "list"))["result"]["agents"]:
+            names.setdefault(a["agent"], []).append(a.get("terminal_title_stripped") or a["pane_id"])
+    except Exception:
+        pass
+    n = len(rows)
+    banned = [r for r in rows if r["config"].rstrip("/") in BANNED_LOGINS]
+    for r in banned:
+        add("red", "claude-login", f"pid {r['pid']} runs on {BANNED_LOGINS[r['config'].rstrip('/')]} ({r['config']})")
+    uncapped = [r["pid"] for r in rows if not r["autocompact"]]
+    add("green" if n <= 2 else "amber", "claude-agents", f"{n} Claude process(es) running (target: Agent Zero plus at most one builder)")
+    if uncapped:
+        add("amber", "claude-cap", f"{len(uncapped)} Claude process(es) started without the hard context cap (pids {', '.join(uncapped)}); it applies at their next launch")
+    cx = len(names.get("codex", []))
+    add("green", "codex-agents", f"{cx} Codex pane(s): {', '.join(names.get('codex', []))[:200]}")
+
+
+def live_claude_sessions():
+    """Session ids of the Claude agents herdr sees right now (closed seats do not count, however big they ended)."""
+    try:
+        return {a["agent_session"]["value"]: a.get("terminal_title_stripped") or a["pane_id"]
+                for a in json.loads(sh("herdr", "agent", "list"))["result"]["agents"]
+                if a["agent"] in ("claude", "siso") and a.get("agent_session", {}).get("value")}
+    except Exception:
+        return {}
+
+
+def claude_models_and_context(hours):
+    bad, ctx_of = {}, {}
+    live = live_claude_sessions()
+    files = {}
+    for root in CLAUDE_ROOTS:  # ~/.claude-siso/projects is a link to ~/.claude/projects: one file, seen once
+        for f in recent(root + "/projects/**/*.jsonl", hours):
+            files.setdefault(os.path.realpath(f), f)
+    for real, f in files.items():
+        sid = os.path.basename(f)[:-6]
+        last_ctx = 0
+        for line in tail_lines(real):
+            if '"assistant"' not in line or '"model"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            m = (o.get("message") or {}).get("model") or ""
+            if m and not CLAUDE_OK.match(m):
+                bad.setdefault(m, set()).add(os.path.basename(os.path.dirname(f))[-40:])
+            u = (o.get("message") or {}).get("usage") or {}
+            c = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+            if c and not o.get("isSidechain"):
+                last_ctx = c
+        if sid in live:  # the same session can sit under two login folders; the newest file is the live one
+            prev = ctx_of.get(sid)
+            if not prev or os.path.getmtime(real) > prev[1]:
+                ctx_of[sid] = (last_ctx, os.path.getmtime(real))
+    for m, where in bad.items():
+        add("red", "claude-model", f"old Claude model {m} used in the last {hours}h ({', '.join(sorted(where))[:160]})")
+    if not bad:
+        add("green", "claude-model", f"every Claude call in the last {hours}h is on a current model")
+    over = False
+    for sid, (c, _) in sorted(ctx_of.items(), key=lambda kv: -kv[1][0]):
+        if c > CAP:
+            over = True
+            add("red" if c > OWNER_CAP else "amber", "claude-context", f"{live[sid]} at {c // 1000}k context (cap {CAP // 1000}k, owners {OWNER_CAP // 1000}k)")
+    if not over:
+        add("green", "claude-context", "live Claude agents: " + ", ".join(f"{live[s]} {c // 1000}k" for s, (c, _) in ctx_of.items()) + f" (cap {CAP // 1000}k)")
+
+
+def codex(hours):
+    cfg = open(HOME + "/.codex/config.toml").read()
+    olds = sorted(set(re.findall(r'^\s*(?:agents\.default_subagent_)?model\s*=\s*"([^"]+)"', cfg, re.M)) - CODEX_OK)
+    add("red" if olds else "green", "codex-config", f"old models in ~/.codex/config.toml: {', '.join(olds)}" if olds else "every model in ~/.codex/config.toml is current")
+    lim = re.search(r"^model_auto_compact_token_limit\s*=\s*(\d+)", cfg, re.M)
+    add("green" if lim and int(lim[1]) <= CODEX_CAP else "red", "codex-cap", f"Codex auto-compact at {lim[1] if lim else 'unset'} (cap {CODEX_CAP // 1000}k)")
+    bad, big = {}, []
+    for f in recent(HOME + "/.codex/sessions/2026/**/*.jsonl", hours):
+        m = cwd = None
+        ctx = 0
+        try:
+            cwd = json.loads(open(f).readline())["payload"].get("cwd", "")
+        except Exception:
+            pass
+        for line in tail_lines(f, 2_000_000):
+            if '"turn_context"' in line:
+                try:
+                    m = json.loads(line)["payload"].get("model")
+                except Exception:
+                    pass
+            elif '"token_count"' in line:
+                try:
+                    ctx = json.loads(line)["payload"]["info"]["last_token_usage"]["input_tokens"]
+                except Exception:
+                    pass
+        if m and m not in CODEX_OK:
+            bad.setdefault(m, []).append(((cwd or "?").replace(WS + "/", "")[-50:], os.path.getmtime(f)))
+        if ctx > CODEX_CAP:
+            big.append((ctx, (cwd or f).replace(WS + "/", "")))
+    fixed_at = os.path.getmtime(HOME + "/.codex/config.toml")
+    for m, where in bad.items():
+        newest = max(t for _, t in where)
+        lvl, why = ("amber", f", all before the config last changed at {time.strftime('%H:%M', time.localtime(fixed_at))}") if newest < fixed_at and not olds else ("red", "")
+        add(lvl, "codex-model", f"old Codex model {m} in the last {hours}h{why}: {', '.join(sorted({w for w, _ in where}))[:200]}")
+    if not bad:
+        add("green", "codex-model", f"every Codex session in the last {hours}h is on gpt-6-luna or gpt-6.1-sol")
+    for ctx, w in sorted(big, reverse=True)[:3]:
+        add("amber", "codex-context", f"{ctx // 1000}k context in a Codex session ({w[-80:]})")
+
+
+def agent_base():
+    try:
+        v = json.loads(urllib.request.urlopen("http://127.0.0.1:5401/api/version", timeout=5).read())
+    except Exception as e:
+        add("red", "ab-live", f"Agent Base on :5401 does not answer ({e.__class__.__name__})")
+        return
+    main = sh("git", "-C", AB, "rev-parse", "origin/main").strip()
+    live = v.get("sha", "")
+    if live and main and live == main:
+        add("green", "ab-live", f"Agent Base live = origin/main ({main[:7]})")
+    else:
+        behind = sh("git", "-C", AB, "rev-list", "--count", f"{live}..{main}").strip() if live and main else "?"
+        add("amber", "ab-live", f"Agent Base live {live[:7]} is {behind} commit(s) behind origin/main {main[:7]} (the ship queue deploys on land)")
+    runner = sh("pgrep", "-f", "tools/ab-queue run").split()
+    add("green" if runner else "red", "ab-queue", "ship queue runner is running" if runner else "ship queue runner is NOT running: nothing lands")
+
+
+def machines():
+    st = sh("tailscale", "status")
+    mini = next((l for l in st.splitlines() if "mac-mini" in l), "")
+    add("red" if not mini or "offline" in mini else "green", "mini", "Mac mini offline on Tailscale (its Codex lanes, HALO Sheets, Buzz and voice notes wait)" if "offline" in mini or not mini else "Mac mini online")
+    df = sh("df", "-g", "/").splitlines()[-1].split()
+    free = int(df[3])
+    add("green" if free >= 100 else "amber" if free >= 30 else "red", "laptop-disk", f"laptop {free} GB free (target 100)")
+    try:
+        b = json.load(open(os.path.join(WS, "SISO_Agents/siso-estate/machines/laptop/backup.json")))
+        t = time.mktime(time.strptime(b["ran_at"][:19], "%Y-%m-%dT%H:%M:%S"))
+        age = (time.time() - t) / 3600
+        add("green" if age < 26 else "red", "backup", f"laptop backup to GitHub {age:.0f}h ago ({len(b['results'])} repos)")
+    except Exception as e:
+        add("red", "backup", f"no laptop backup record ({e.__class__.__name__})")
+
+
+def trigger(text):
+    """Who started a turn (same classes as siso-firstmate .agents/a0/specs/2026-10-03-stack-first-principles/measure.py)."""
+    t = text.lstrip()
+    if "task-notification>" in t[:200]: return "a finished sub-agent/background task"
+    if "Stop hook" in t[:300] or "hook blocking error" in t[:400]: return "a hook"
+    if "<cross-session-message" in t[:200] or t.startswith("Another Claude session") or re.match(r"^[A-Z0-9-]{3,}\s*(:|→|->)", t): return "another agent"
+    if t.startswith("This session is being continued") or "Compacted" in t[:80]: return "compaction"
+    if t.startswith(("<system-reminder>", "[SYSTEM", "Caveat:", "<local-command", "<command-")) or "heard from you" in t[:300]: return "system"
+    return "Shaan"
+
+
+def turns_today():
+    """Of today's Claude tokens (main sessions), the share on turns Shaan did not start, and the share in calls above the cap."""
+    midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    by, total, above, seen, who = {}, 0, 0, set(), {}
+    for f in {os.path.realpath(x) for r in CLAUDE_ROOTS for x in glob.glob(r + "/projects/*/*.jsonl") if os.path.getmtime(x) >= midnight}:
+        cur = "Shaan"
+        for line in open(f, errors="ignore"):
+            if '"type":"user"' not in line and '"type":"assistant"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            ts = o.get("timestamp", "")
+            try:
+                t = time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            except ValueError:
+                continue
+            msg = o.get("message") or {}
+            if o["type"] == "user" and not o.get("isSidechain"):
+                c = msg.get("content")
+                if isinstance(c, str):
+                    cur = trigger(c)
+                elif isinstance(c, list) and c and c[0].get("type") == "text":
+                    cur = trigger(c[0].get("text", ""))
+            elif o["type"] == "assistant" and t >= midnight:
+                mid = msg.get("id")
+                if not mid or mid in seen:
+                    continue
+                seen.add(mid)
+                u = msg.get("usage") or {}
+                n = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0)
+                by[cur] = by.get(cur, 0) + n
+                total += n
+                if n - u.get("output_tokens", 0) > CAP:
+                    above += n
+                    k = (o.get("cwd") or "?").rstrip("/").split("/")[-1]
+                    who[k] = who.get(k, 0) + n
+    if not total:
+        add("green", "turns", "no Claude tokens yet today")
+        return
+    not_him = 1 - by.get("Shaan", 0) / total
+    top = ", ".join(f"{k} {v / total:.0%}" for k, v in sorted(by.items(), key=lambda kv: -kv[1]) if k != "Shaan")[:200]
+    add("green" if not_him < 0.3 else "amber" if not_him < 0.5 else "red", "turns", f"today {total / 1e9:.2f}B Claude tokens in main sessions; {not_him:.0%} on turns Shaan did not start ({top}) (target under 30%)")
+    add("green" if above / total < 0.1 else "amber" if above / total < 0.3 else "red", "big-context", f"today {above / total:.0%} of Claude tokens were in calls above {CAP // 1000}k context (target under 10%); most in " + ", ".join(f"{k} {v / 1e6:.0f}M" for k, v in sorted(who.items(), key=lambda kv: -kv[1])[:4]))
+
+
+def renewals():
+    """Paid plans: past due is red, renewing within 4 days is amber (bin/renewals; Shaan 3 Oct: know before the card runs out).
+    A plan with a "known" note in renewals.json (a state Shaan already decided) is amber, not red."""
+    KNOWN = {p["name"]: p["known"] for p in json.load(open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "renewals.json")))["plans"] if p.get("known")}
+    try:
+        rows = json.loads(sh(os.path.join(os.path.dirname(os.path.realpath(__file__)), "renewals"), "--json", timeout=40))
+    except Exception:
+        add("amber", "renewals", "renewals could not be read")
+        return
+    for r in rows:
+        known = KNOWN.get(r["name"])
+        if known and r["status"] in ("past_due", "unpaid", "canceled", "unreadable"):
+            add("amber", "renewals", f"{r['name']}: {known}")  # a decided state, not a fault (renewals.json "known")
+        elif r["status"] in ("past_due", "unpaid", "canceled", "unreadable"):
+            add("red", "renewals", f"{r['name']} is {r['status'].replace('_', ' ')} {r.get('why', '')}".strip())
+        elif r.get("days_left") is not None and r["days_left"] <= 4:
+            add("amber", "renewals", f"{r['name']} renews {r['renews_local']} ({r['days_left']} days): " + (known or "use it up, top up the card"))
+        else:
+            add("green", "renewals", f"{r['name']} renews {r.get('renews_local', '?')}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="stack-doctor", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--hours", type=float, default=6)
+    a = p.parse_args()
+    for fn in (claude_processes, turns_today, lambda: claude_models_and_context(a.hours), lambda: codex(a.hours), agent_base, machines, renewals):
+        try:
+            fn()
+        except Exception as e:
+            add("red", getattr(fn, "__name__", "check"), f"check crashed: {e!r}"[:200])
+    order = {"red": 0, "amber": 1, "green": 2}
+    out.sort(key=lambda r: order[r["level"]])
+    if a.json:
+        print(json.dumps(out, indent=1))
+    else:
+        mark = {"red": "✗", "amber": "!", "green": "✓"}
+        n = {k: sum(r["level"] == k for r in out) for k in order}
+        print(f"stack-doctor: {n['red']} red, {n['amber']} amber, {n['green']} green")
+        for r in out:
+            print(f"  {mark[r['level']]} {r['check']:15} {r['msg']}")
+    return 1 if any(r["level"] == "red" for r in out) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""a0-autoplace: file every unsorted agent in Agent Base under its project/owner by the folder it works in.
+
+Runs from launchd every minute (com.siso.a0-autoplace); no tokens. Agent Zero places domains (Agent Base SPEC); this does
+the obvious cases so nothing sits in Unsorted. Rules: longest matching path fragment wins; edit RULES to add one.
+Shaan, 2 Oct 2026: "i still keep getting unsorted agents like this is retarded".
+"""
+import json, sys, urllib.request
+API = "http://127.0.0.1:5401/api"
+RULES = [  # (path fragment, project, domain, owner or None)
+    ("siso-internal-labs-agent-base", "SISO Internal Labs", "Agent Base", "AGENT-BASE"),
+    ("siso-internal-labs-agents", "SISO Internal Labs", "Agent Base", "AGENT-BASE"),
+    ("SISO_Agents/siso-harness-lab", "SISO Internal Labs", "Efficiency", "STACK-OPT"),
+    ("SISO_Agents/laptop-health", "SISO Internal Labs", "Health", "Shaan's MacBook laptop-health check"),
+    ("worktrees/halo-operator", "HALO", "Ops Hub", "OPS-BUILD"),
+    ("partners/halo/oracle/operator-app", "HALO", "Ops Hub", "OPS-BUILD"),
+    ("partners/halo/oracle", "HALO", "Streaming go-live", "STREAMING-CLAUDE"),
+    ("worktrees/oracle", "HALO", "Streaming go-live", "STREAMING-CLAUDE"),
+    ("partners/halo/crm", "HALO", "CRM UI", "HALO-UI"),
+    ("worktrees/halocrm", "HALO", "CRM UI", "HALO-UI"),
+    ("partners/halo", "HALO", "CRM UI", "HALO-UI"),
+    ("partners/fahmy", "Fahmy's agency", None, None),
+    ("SISO_Agents/siso-estate", "SISO Internal Labs", "Estate", None),
+]
+def call(path, body=None):
+    req = urllib.request.Request(API + path, data=json.dumps(body).encode() if body else None,
+                                 headers={"content-type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=5).read())
+try:
+    d = call("/agents")
+except Exception as e:
+    sys.exit(0)  # app not running: nothing to do
+agents = d.get("agents", d) if isinstance(d, dict) else d
+for a in agents:
+    if not isinstance(a, dict) or a.get("project") or a.get("name") in (None, "Agent Zero"): continue
+    cwd = a.get("cwd") or a.get("foreground_cwd") or ""
+    hit = max((r for r in RULES if r[0] in cwd), key=lambda r: len(r[0]), default=None)
+    if not hit: continue
+    body = {"op": "register", "name": a["name"], "project": hit[1]}
+    if hit[2]: body["domain"] = hit[2]
+    if hit[3]: body.update(owner=hit[3], kind="worker")
+    try:
+        call("/registry", body); print("placed", a["name"], "->", hit[1], hit[2] or "", hit[3] or "")
+    except Exception as e:
+        print("failed", a["name"], e, file=sys.stderr)

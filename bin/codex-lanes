@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""codex-lanes: one place to see every piece of Codex work: the Codex tabs, the pairs, and the background codex-run jobs.
+
+Shaan, 3 Oct ~18:40: "there should be an easy place for agent zero to check up on the work that we allocated to codexes
+... without us really searching". Pulled, never pinged: reading a lane costs the lane nothing.
+
+  codex-lanes [--json] [--lines N] [--hours H]
+    tabs   every herdr pane running Codex: tab name, working/idle/done, model, how long its last turn ran, and the last
+           N lines of its final message (default 6)
+    pairs  each `pair` plan: items done / open / blocked, last commits
+    runs   codex-run jobs in the last H hours (default 24): model, folder, minutes, status, tokens
+"""
+import argparse, json, os, re, subprocess, time
+
+HOME = os.path.expanduser("~")
+CHROME = re.compile(r"^\s*(› |›$|↳|⚠|← for agents|Ask Codex|\d+ background terminal|Tip:|esc to interrupt)")
+
+
+def sh(*a, timeout=10):
+    try:
+        return subprocess.run(a, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def tabs(nlines):
+    try:
+        agents = json.loads(sh("herdr", "agent", "list"))["result"]["agents"]
+        tl = json.loads(sh("herdr", "tab", "list"))["result"]
+        labels = {t["tab_id"]: t.get("label") for t in (tl.get("tabs", tl) if isinstance(tl, dict) else tl)}
+    except Exception:
+        return []
+    out = []
+    for a in agents:
+        if a["agent"] != "codex":
+            continue
+        screen = sh("herdr", "pane", "read", a["pane_id"], "--lines", "60").splitlines()
+        footer = next((l.strip() for l in reversed(screen) if re.search(r"(GPT|gpt)-\S+ (low|medium|high|xhigh)", l)), "")
+        model = (re.search(r"((?:GPT|gpt)-\S+ (?:low|medium|high|xhigh))", footer) or [None, ""])[1]
+        worked = next((l.strip() for l in reversed(screen) if l.strip().startswith(("Worked for", "─ Worked for"))), "")
+        body, cut = [], False
+        for l in reversed(screen):  # the last message: lines above the input box, below the previous turn marker
+            s = l.rstrip()
+            if footer and footer in s or CHROME.match(s) or s.strip().startswith(("Worked for", "─ Worked for")):
+                if body:
+                    cut = True
+                continue
+            if cut and s.strip().startswith(("• ", "› ")):
+                break
+            if s.strip():
+                body.append(s.strip())
+            if len(body) >= nlines:
+                break
+        branch = sh("git", "-C", a["cwd"], "branch", "--show-current").strip()
+        last = sh("git", "-C", a["cwd"], "log", "-1", "--format=%h %cr: %s").strip()[:100]
+        out.append({"tab": labels.get(a["tab_id"]) or a.get("terminal_title_stripped") or a["pane_id"], "pane": a["pane_id"],
+                    "status": a["agent_status"], "model": model, "task": a.get("terminal_title_stripped", ""),
+                    "cwd": a["cwd"].replace(HOME, "~"), "branch": branch, "last_commit": last,
+                    "worked": worked.replace("─", "").strip(), "said": list(reversed(body))})
+    return out
+
+
+def pairs():
+    rows = []
+    try:
+        reg = json.load(open(os.path.join(os.environ.get("PAIR_STATE") or HOME + "/.local/state/pair", "pairs.json")))
+    except Exception:
+        return rows
+    for name, p in reg.items():
+        try:
+            items = [l for l in open(p["plan"]).read().splitlines() if re.match(r"^- \[[ x!]\] P\d+", l)]
+        except OSError:
+            items = []
+        rows.append({"pair": name, "pane": p.get("pane"), "model": p.get("model"), "done": sum(l.startswith("- [x]") for l in items),
+                     "open": sum(l.startswith("- [ ]") for l in items), "blocked": [l[6:120] for l in items if l.startswith("- [!]")],
+                     "next": next((l[6:110] for l in items if l.startswith("- [ ]")), ""),
+                     "commits": sh("git", "-C", p["worktree"], "log", "-3", "--format=%h %cr: %s").strip().splitlines()})
+    return rows
+
+
+def runs(hours):
+    cut = time.time() - hours * 3600
+    rows = []
+    try:
+        for line in open(HOME + "/.local/state/codex-run/log.jsonl"):
+            try:
+                r = json.loads(line)
+                t = time.mktime(time.strptime(r["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
+            except Exception:
+                continue
+            if t >= cut:
+                rows.append({"at": r["ts"][11:16], "model": r.get("model"), "dir": (r.get("dir") or "").replace(HOME + "/SISO_Workspace/", "")[-60:],
+                             "min": round((r.get("secs") or 0) / 60), "status": r.get("status"), "task": r.get("task"),
+                             "mtok": round((r.get("input_tokens") or 0) / 1e6, 1)})
+    except OSError:
+        pass
+    return rows
+
+
+def fleets():
+    """Research/job fleets started by `fleet run`: their manifest is the state (level-triggered, nothing is sent)."""
+    d = os.environ.get("FLEET_STATE") or HOME + "/.local/state/fleet"
+    out = []
+    for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        try:
+            m = json.load(open(os.path.join(d, n, "manifest.json")))
+        except Exception:
+            continue
+        c = {k: sum(j["status"] == k for j in m["jobs"]) for k in ("queued", "running", "done", "failed")}
+        out.append({"fleet": n, "model": m.get("model"), "created": m.get("created"), "finished": m.get("finished"), **c,
+                    "jobs": [{"id": j["id"], "status": j["status"]} for j in m["jobs"]]})
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="codex-lanes", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--lines", type=int, default=6)
+    ap.add_argument("--hours", type=float, default=24)
+    a = ap.parse_args()
+    data = {"at": int(time.time()), "tabs": tabs(a.lines), "pairs": pairs(), "runs": runs(a.hours), "fleets": fleets()}
+    if a.json:
+        print(json.dumps(data, indent=1))
+        return 0
+    print(f"codex-lanes: {len(data['tabs'])} tab(s), {len(data['pairs'])} pair(s), {len(data['runs'])} codex-run job(s) in {a.hours:g}h")
+    for t in data["tabs"]:
+        print(f"\n■ {t['tab']} [{t['status']}] {t['model']} · {t['cwd']}{' @' + t['branch'] if t['branch'] else ''}")
+        if t["worked"]:
+            print(f"  {t['worked']} · last commit {t['last_commit']}")
+        for l in t["said"]:
+            print("  │ " + l[:160])
+    for p in data["pairs"]:
+        print(f"\n■ pair {p['pair']}: {p['done']} done, {p['open']} open, {len(p['blocked'])} blocked · {p['model']} in {p['pane']}")
+        if p["next"]:
+            print(f"  next: {p['next']}")
+        for b in p["blocked"]:
+            print(f"  BLOCKED {b}")
+        for c in p["commits"][:2]:
+            print(f"  {c[:110]}")
+    for f in data["fleets"]:
+        if f["finished"] and not f["running"] and f["finished"] < time.strftime("%Y-%m-%dT%H", time.localtime(time.time() - a.hours * 3600)):
+            continue
+        print(f"\n■ fleet {f['fleet']}: {f['done']} done, {f['running']} running, {f['queued']} queued, {f['failed']} failed · {f['model']}")
+        print("  " + " · ".join(f"{j['id']} {j['status']}" for j in f["jobs"])[:300])
+    if data["runs"]:
+        print("\n■ codex-run")
+        for r in data["runs"][-8:]:
+            print(f"  {r['at']} {r['status']:7} {r['model']:12} {r['min']:>3}m {r['mtok']:>6}M tok  {r['dir']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
