@@ -18,7 +18,6 @@
 </p>
 
 <!-- /siso-os:header -->
-
 ## What it is
 
 The orchestrator: turns one person's words into tasks for a team of agents, checks what comes back and keeps the state.
