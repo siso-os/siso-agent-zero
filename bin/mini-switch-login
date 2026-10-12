@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""mini-switch-login NAME CONFIG_DIR [--then "text"] [--compact PCT]: move one Mac mini owner (a Claude chat in tmux session
+ab-owners, started by ab-remote) to another Claude login, same conversation. owner-switch-login does this for laptop panes;
+this is its Mac mini twin (Shaan, 9 Oct ~03:00: "swap all of our accounts over to the other ... Claude").
+
+Run from the laptop: it copies itself to the mini and runs there in the background (log /tmp/mini-switch-NAME.log there),
+returning at once. On the mini it:
+1. waits (up to 30 min) until the chat is idle, so no turn is cut short;
+2. moves the conversation (<config>/projects/<folder>/<session>.jsonl plus its <session>/ folder) into the new login's
+   projects folder (a rename on the same disk);
+3. respawns the chat's tmux window on the new login with --resume, and --then as its first message.
+If the respawn fails, the files move back. CONFIG_DIR is the path on the mini, e.g. ~/.config/claude-siso-3 (lordsisodia) or
+~/.claude-siso (fuzeheritage)."""
+import glob, json, os, shlex, subprocess, sys, time
+
+A = sys.argv[1:]
+def opt(k, d=None):
+    if k in A:
+        i = A.index(k); v = A[i + 1]; del A[i:i + 2]; return v
+    return d
+then = opt("--then", "Agent Zero: you moved to another Claude login, same conversation. Carry on where you were.")
+compact = opt("--compact", "40")
+remote = "--on-mini" in A
+if remote: A.remove("--on-mini")
+name, cfg = A[0], A[1]
+
+if not remote:  # laptop side: ship this file and run it on the mini, detached
+    src = os.path.abspath(__file__)
+    subprocess.run(["scp", "-q", src, "mini-fast:/tmp/mini-switch-login"], check=True)
+    cmd = " ".join(shlex.quote(x) for x in ["python3", "/tmp/mini-switch-login", name, cfg, "--then", then, "--compact", compact, "--on-mini"])
+    subprocess.run(["ssh", "mini-fast", f"nohup {cmd} > /tmp/mini-switch-{name}.log 2>&1 &"], check=True)
+    print(f"{name}: switch armed on the mini (waits for idle); log mini:/tmp/mini-switch-{name}.log")
+    sys.exit(0)
+
+HOME = os.path.expanduser("~")
+HOSTS = f"{HOME}/.local/state/agent-base/hosts"
+HOST = f"{HOME}/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base/remote-host/services/host/bin/siso-host"
+new = os.path.abspath(os.path.expanduser(cfg))
+log = lambda m: print(time.strftime("%H:%M:%S"), m, flush=True)
+
+def alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+
+def live_record():
+    recs = []
+    for f in glob.glob(f"{HOSTS}/*.json"):
+        try: d = json.load(open(f))
+        except Exception: continue
+        if d.get("name") == name and d.get("harness", "claude") != "codex" and alive(d.get("pid") or 0):
+            recs.append((os.path.getmtime(f), d))
+    return max(recs, key=lambda r: r[0])[1] if recs else None
+
+rec = live_record()
+# 9 Oct ~07:50: remote-host was removed under the running owners, the respawn exited at once and the window vanished.
+if not os.access(HOST, os.X_OK): sys.exit(log(f"host program missing ({HOST}); nothing moved. Recreate the remote-host worktree from origin/main and pnpm install --filter ./services/host..."))
+if not rec: sys.exit(log(f"no live host for {name}"))
+session = rec["session"]
+for _ in range(180):  # 30 minutes
+    if (live_record() or {}).get("state") == "idle": break
+    time.sleep(10)
+else:
+    sys.exit(log("still working after 30 min; nothing moved"))
+log(f"{name} idle; session {session}")
+
+olds = [p for p in glob.glob(f"{HOME}/.claude-siso/projects/*/{session}.jsonl") + glob.glob(f"{HOME}/.config/*/projects/*/{session}.jsonl")]
+if not olds: sys.exit(log("conversation file not found"))
+old = max(olds, key=os.path.getmtime)
+folder = os.path.basename(os.path.dirname(old))
+oldcfg = os.path.dirname(os.path.dirname(os.path.dirname(old)))
+if oldcfg == new: sys.exit(log(f"already on {new}"))
+dst = f"{new}/projects/{folder}"
+os.makedirs(dst, exist_ok=True)
+moves = [(old, f"{dst}/{session}.jsonl")]
+if os.path.isdir(old[:-6]): moves.append((old[:-6], f"{dst}/{session}"))
+for a, b in moves: os.rename(a, b)
+log(f"moved {len(moves)} item(s) {oldcfg} -> {new}")
+
+args = ["--permission-mode", "bypassPermissions", "--name", name, "--model", rec.get("model") or "claude-opus-5-5[1m]"]
+if rec.get("effort"): args += ["--effort", rec["effort"]]
+args += ["--resume", session, "--prompt", then]
+shell = (f'PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" CLAUDE_CONFIG_DIR={shlex.quote(new)} '
+         f"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={shlex.quote(compact)} exec {shlex.quote(HOST)} " + " ".join(shlex.quote(a) for a in args))
+r = subprocess.run(["tmux", "respawn-window", "-k", "-t", f"ab-owners:{name}", "-c", rec.get("cwd") or HOME, shell], capture_output=True, text=True)
+if r.returncode:
+    for a, b in moves: os.rename(b, a)
+    sys.exit(log(f"respawn failed, files moved back: {r.stderr.strip()}"))
+for _ in range(30):
+    time.sleep(2)
+    d = live_record()
+    if d and d.get("pid") != rec.get("pid"):
+        log(f"{name} relaunched on {new} (pid {d['pid']}, state {d.get('state')})"); break
+else:
+    log("respawned; no new host record within 60 s (check: tmux attach -t ab-owners)")

@@ -8,7 +8,7 @@ fleets, jobs, git, launchd). This answers all of them at once, in at most ~30 li
   look          the screen
   look --json   the same, for a script
 """
-import glob, json, os, subprocess, sys, datetime, re
+import glob, json, os, subprocess, sys, datetime, re, math
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 H = os.path.expanduser("~")
@@ -52,26 +52,49 @@ def shipping():
     return out
 
 
+def timestamp(value):
+    """Read epoch seconds or ISO timestamps; invalid records must not close a run."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        try:
+            seconds = float(value)
+        except ValueError:
+            seconds = datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        if not math.isfinite(seconds):
+            return None
+        datetime.datetime.fromtimestamp(seconds)  # Reject epochs we cannot display.
+        return seconds
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def jobs():
     """What Agent Zero sent out and what came back (Shaan, 4 Oct: "we must have spawned off 10 different things and unless i'm relying
     from memory or i ask you there's no way to find out what we spawned off and what i'm expecting back"). From codex-run's run records."""
     out, now = [], datetime.datetime.now().timestamp()
     latest = {}
     # A run Agent Zero has dealt with (landed, superseded, handed to the UI chat) is closed: one line in closed.jsonl
-    # ({"name", "at" epoch, "why"}); it leaves Out until that name is sent again.
+    # ({"name", "at" epoch or ISO, "why"}); it leaves Out until that name is sent again.
     closed = {}
     for l in open(f"{H}/.local/state/a0/closed.jsonl") if os.path.exists(f"{H}/.local/state/a0/closed.jsonl") else []:
         try:
-            c = json.loads(l); closed[c["name"]] = max(closed.get(c["name"], 0), c["at"])
-        except (ValueError, KeyError):
+            c = json.loads(l)
+            at = timestamp(c["at"])
+            if at is not None and isinstance(c["name"], str):
+                closed[c["name"]] = max(closed.get(c["name"], 0), at)
+        except (ValueError, KeyError, TypeError):
             pass
     for f in glob.glob(f"{H}/.local/state/codex-run/runs/*.meta.json"):
         try:
             m = json.load(open(f))
         except ValueError:
             continue
-        if now - m.get("started", 0) < 6 * 3600 and m.get("started", 0) >= latest.get(m.get("name"), ({}, 0))[1]:
-            latest[m.get("name")] = ({**m, "base": f[:-10]}, m.get("started", 0))
+        if not isinstance(m, dict) or not isinstance(m.get("name"), str):
+            continue
+        started = timestamp(m.get("started"))
+        if started is not None and now - started < 6 * 3600 and started >= latest.get(m["name"], ({}, 0))[1]:
+            latest[m["name"]] = ({**m, "base": f[:-10]}, started)
     for name, (m, started) in sorted(latest.items(), key=lambda kv: kv[1][1]):
         if closed.get(name, 0) > started:
             continue

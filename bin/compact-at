@@ -1,0 +1,22 @@
+#!/bin/sh
+# compact-at NAME PCT [--now]: set when one Claude owner auto-compacts, mid-session, keeping its conversation.
+# Shaan, 8 Oct ~22:25: "what about the scalable compact context thing I told you to do, that was never done"; ~20:45: "certain
+# agents I want might want more, some I might want less ... the operator UI right now is compacting on 30% ... I might want to
+# bump him up to 50". Claude reads its autocompact point once at start, so this waits until the chat is idle (never cuts a turn;
+# --now skips the wait), relaunches it on the same login and session with the new point, and remembers it in
+# ~/.local/state/a0/compact-at.json so later relaunches (owners-revive, owner-switch-login) keep it. Agent Base's context-ring
+# dial (t-0548) calls this. compact-at with no arguments lists the saved points.
+here=$(cd "$(dirname "$0")" && pwd); S="$HOME/.local/state/a0/compact-at.json"
+[ -n "${1:-}" ] || { cat "$S" 2>/dev/null || echo "{} (every owner at the default 35%)"; exit 0; }
+name="$1"; pct="${2:?usage: compact-at NAME PCT [--now]}"
+case "$pct" in ''|*[!0-9]*) echo "PCT is a whole number, 10-90"; exit 2;; esac
+[ "$pct" -ge 10 ] && [ "$pct" -le 90 ] || { echo "PCT is 10-90"; exit 2; }
+cfg=$(python3 -c "
+import json,glob,os,sys
+for f in glob.glob(os.path.expanduser('~/.local/state/agent-base/hosts/w*_p*.json')):
+    d=json.load(open(f))
+    if d.get('name')==sys.argv[1]:
+        try: os.kill(int(d['pid']),0); print(d.get('configDir') or ''); break
+        except Exception: pass" "$name")
+[ -n "$cfg" ] || { echo "$name: no live Claude owner by that name"; exit 1; }
+exec "$here/owner-switch-login" "$name" "$cfg" --compact "$pct" ${3:+"$3"}

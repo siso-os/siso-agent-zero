@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Produce Agent Base widgets from an explicit operational manifest; dry-run by default."""
+import argparse
+import datetime as dt
+import hashlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+
+PRODUCER = 'a0-widgets-v1'
+LIMIT = 256 * 1024
+ORDER = ['building', 'allocated', 'specced', 'asked', 'built', 'checked', 'parked', 'dropped']
+ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def safe_path(path, missing=False):
+    path = Path(os.path.abspath(path))
+    for part in [*reversed(path.parents), path]:
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            if missing:
+                continue
+            raise ValueError('Required source unavailable') from None
+        require(not stat.S_ISLNK(info.st_mode), 'Symlink paths are not accepted')
+    return path
+
+
+def read(path, limit=2 * 1024 * 1024):
+    path = safe_path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1, 'Source must be an owned regular file')
+        data = stream.read(limit + 1)
+        require(len(data) <= limit, 'Source exceeds byte limit')
+        require(os.fstat(stream.fileno()).st_mtime_ns == info.st_mtime_ns, 'Source changed during read')
+    return data.decode('utf-8')
+
+
+def text(value, maximum=4000):
+    require(isinstance(value, str) and len(value.encode('utf-16-le')) // 2 <= maximum and '\0' not in value, 'Invalid or oversized text')
+    return value
+
+
+def token(value):
+    require(isinstance(value, (str, int)) and not isinstance(value, bool), 'Invalid item identity')
+    value = str(value)
+    require(ID.fullmatch(value) is not None, 'Invalid item identity')
+    return value
+
+
+def objects(value):
+    require(isinstance(value, list) and len(value) <= 10000 and all(isinstance(v, dict) for v in value), 'Expected at most 10000 object rows')
+    return value
+
+
+def build(manifest_path):
+    manifest_path = safe_path(manifest_path)
+    manifest_raw = read(manifest_path)
+    manifest = json.loads(manifest_raw)
+    require(isinstance(manifest, dict) and set(manifest) <= {'announcements', 'inbox', 'plans', 'tasks', 'issues'}, 'Invalid source manifest')
+    source_hashes = {str(manifest_path): hashlib.sha256(manifest_raw.encode()).hexdigest()}
+    def source(name, jsonl=False):
+        require(isinstance(name, str) and bool(name), 'Manifest source path required')
+        path = Path(name) if Path(name).is_absolute() else manifest_path.parent / name
+        raw = read(path)
+        source_hashes[str(path)] = hashlib.sha256(raw.encode()).hexdigest()
+        return [json.loads(line) for line in raw.splitlines() if line.strip()] if jsonl else json.loads(raw)
+    ann = objects(source(manifest.get('announcements'), True))
+    inbox = source(manifest.get('inbox'), True)
+    require(isinstance(inbox, list) and all(isinstance(row, dict) for row in inbox), 'Invalid inbox rows')
+    seen = {row['text'].split(':', 1)[0].removeprefix('announcement ').strip() for row in inbox
+            if isinstance(row.get('text'), str) and row['text'].startswith('announcement ') and row['text'].endswith(': seen')}
+    items = []
+    for row in reversed(ann):
+        aid = token(row.get('id', ''))
+        items.append(dict(id=aid, title=text(row.get('title', ''), 200), body=text(row.get('body', '')),
+                          project=text(row.get('project') or 'Unsorted', 200), at=text(row.get('at', ''), 64),
+                          needs=text(row.get('needs') or ''), seen=aid in seen))
+    require(len({r['id'] for r in items}) == len(items), 'Duplicate announcement identity')
+    updated = '1970-01-01T00:00:00Z'  # Replaced below with the newest declared source timestamp.
+    docs = {}
+    def put(wid, title, shape, data, actions=()):
+        require(wid not in docs and len(docs) < 128, 'Duplicate or excessive widgets')
+        docs[wid] = dict(id=wid, agent='A0', title=text(title, 200), shape=shape, updated=updated,
+                         data=data, actions=[dict(kind=k) for k in actions], producer=PRODUCER)
+    def pages(wid, title, shape, key, rows, extra=None, actions=()):
+        # Stable numbered pages satisfy both row and byte limits without dropping records.
+        chunks, chunk = [], []
+        for row in rows:
+            candidate = chunk + [row]
+            probe = dict(id=wid+'-999', agent='A0', title=title+' · 999 of 999', shape=shape,
+                         updated=updated, data={**(extra or {}), key:candidate}, actions=[dict(kind=k) for k in actions], producer=PRODUCER)
+            if len(candidate) > 128 or len(encode(probe)) > LIMIT - 2048:
+                require(bool(chunk), 'One row exceeds the widget byte limit')
+                chunks.append(chunk); chunk = [row]
+            else:
+                chunk = candidate
+        chunks.append(chunk)
+        for i, chunk in enumerate(chunks):
+            page_id = wid if i == 0 else f'{wid}-{i+1:03d}'
+            label = title if len(chunks) == 1 else f'{title} · {i+1} of {len(chunks)}'
+            put(page_id, label, shape, {**(extra or {}), key:chunk,
+                'pagination':{'page':i+1,'pages':len(chunks),'rows':len(rows),'group':wid}}, actions)
+    pages('announcements', 'Announcements', 'announcements', 'items', items, actions=['seen', 'reply', 'voice'])
+    pages('needs', 'Needs you', 'needs', 'items', [dict(id=r['id'], title=r['title'], detail=f"{r['project']} · {r['needs']}")
+        for r in items if not r['seen'] and r['needs'] and r['needs'] != 'nothing'])
+    plans = manifest.get('plans')
+    require(isinstance(plans, list) and len(plans) <= 60 and all(isinstance(p, str) for p in plans), 'Explicit plan paths required (at most 60)')
+    counts = {s: 0 for s in ORDER}
+    progress = []
+    for name in plans:
+        plan = source(name)
+        require(isinstance(plan, dict), 'Invalid plan')
+        rows = objects(plan.get('items'))
+        owner, project = text(plan.get('owner', ''), 200), text(plan.get('project', ''), 200)
+        detail = []
+        for row in sorted(rows, key=lambda r: ORDER.index(r.get('status')) if r.get('status') in ORDER else len(ORDER)):
+            status = text(row.get('status', ''), 64)
+            require(bool(status.strip()), 'Plan status must be explicit')
+            counts[status] = counts.get(status, 0) + 1
+            require(len(counts) <= 32, 'Too many distinct plan statuses')
+            who = row.get('to') or ''
+            who = who.get('agent', '') if isinstance(who, dict) else who
+            title, who = text(row.get('title', '')), text(who, 200)
+            identity = text(str(row.get('id', '')), 200)
+            evidence = row.get('evidence') or []
+            require(isinstance(evidence, list), 'Invalid plan evidence')
+            quote = str(row.get('his') or '')
+            quote = quote[:160] if quote and not quote.startswith('(') else ''
+            last = str(evidence[-1])[:200] if evidence else ''
+            detail.append(dict(meta=f"{identity} · {status} · {who}", title=title, quote='\n'.join(v for v in [quote, last] if v)))
+            progress.append(dict(title=title, status=status, owner=who))
+        wid = 'plan-' + hashlib.sha256(name.encode()).hexdigest()[:16]
+        pages(wid, f'{owner} · {project}', 'list', 'rows', detail, dict(project=project, owner=owner,
+            domain=text(plan.get('domain') or '', 200), source=name, sourceUpdated=text(str(plan.get('updated') or ''), 64)))
+    pages('plans', 'Plan progress', 'progress', 'items', progress, dict(checked=counts['checked'], total=len(progress), counts=counts))
+    tasks = objects(manifest.get('tasks'))
+    team = []
+    for descriptor in tasks:
+        record = source(descriptor.get('state'))
+        require(isinstance(record, dict), 'Invalid task record')
+        holder = record.get('holder') or {}
+        require(isinstance(holder, dict), 'Invalid task holder')
+        last = 'No log supplied'
+        if descriptor.get('log'):
+            name = descriptor['log']; path = Path(name) if Path(name).is_absolute() else manifest_path.parent / name
+            raw = read(path); source_hashes[str(path)] = hashlib.sha256(raw.encode()).hexdigest()
+            last = next((line.strip() for line in reversed(raw[-4096:].splitlines()) if line.strip()), 'No log yet')
+        team.append(dict(meta=f"{text(record.get('state', 'unknown'), 64)} · {text(holder.get('model', 'model unknown'), 200)} · liveness unknown",
+                         title=token(descriptor.get('id', '')), quote=text(last)))
+    pages('team', 'Team task records', 'list', 'rows', team, dict(liveness='unknown'))
+    if manifest.get('issues'):
+        issues = source(manifest['issues'], True)
+        objects(issues[-8:])
+        put('health', 'Health issues', 'list', dict(rows=[dict(title=text(str(i.get('id', ''))),
+            meta=f"{text(i.get('machine', ''), 200)} · {text(i.get('status', ''), 64)}",
+            quote=text(i.get('cause') or (i.get('trigger') or {}).get('at', ''))) for i in issues[-8:]]))
+    put('systems', 'Machines', 'systems', dict(source='servers'))
+    latest = max([manifest_path.stat().st_mtime, *(Path(name).stat().st_mtime for name in source_hashes)])
+    updated = dt.datetime.fromtimestamp(latest, dt.timezone.utc).isoformat().replace('+00:00', 'Z')
+    for doc in docs.values():
+        doc['updated'] = updated
+        require(len(encode(doc)) <= LIMIT, 'Widget exceeds 256 KiB; split sources explicitly')
+        require(all(not isinstance(v, list) or len(v) <= 128 for v in doc['data'].values()), 'Widget row limit exceeded')
+        if doc['shape'] == 'needs':
+            for row in doc['data']['items']:
+                text(row['detail'])
+    return docs, source_hashes
+
+
+def encode(doc):
+    return (json.dumps(doc, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()
+
+
+def prepare(docs, output):
+    folder = safe_path(Path(output) / 'A0', missing=True)
+    if folder.parent.exists():
+        root_info = folder.parent.stat()
+        require(stat.S_ISDIR(root_info.st_mode) and root_info.st_uid == os.getuid(), 'Widget root must be an owned directory')
+    if folder.exists():
+        info = folder.stat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), 'Output must be an owned directory')
+        entries = list(folder.iterdir())
+        require(len(entries) <= 512, 'Output directory entry limit exceeded')
+        existing_json = [p for p in entries if p.suffix == '.json']
+        require(len({p.stem for p in existing_json} | set(docs)) <= 128, 'Combined output exceeds 128 widgets')
+        for existing in existing_json:
+            if existing.stem not in docs:
+                value = json.loads(read(existing, LIMIT))
+                require(value.get('producer') != PRODUCER, 'Previous widget no longer in manifest; archive explicitly before publication')
+    payloads = {}
+    for wid, doc in docs.items():
+        target = folder / f'{wid}.json'
+        safe_path(target, missing=True)
+        if target.exists():
+            old = json.loads(read(target, LIMIT))
+            require(old.get('producer') == PRODUCER and old.get('id') == wid and old.get('agent') == 'A0', 'Output collision: another producer owns this widget')
+            if {k:v for k,v in old.items() if k != 'updated'} == {k:v for k,v in doc.items() if k != 'updated'}:
+                doc['updated'] = old['updated']
+        payloads[target] = encode(doc)
+    return folder, payloads
+
+
+def run(args):
+    docs, sources = build(args.manifest)
+    if getattr(args, 'read_only_actions', False):
+        for doc in docs.values():
+            doc['actions'] = []
+    guard = getattr(args, 'source_guard', None)
+    expected = json.loads(read(guard)) if guard else sources
+    require(isinstance(expected, dict) and expected == sources, 'Source guard changed; inspect a fresh snapshot before publishing')
+    def unchanged():
+        require(all(hashlib.sha256(read(name).encode()).hexdigest() == digest for name, digest in expected.items()),
+                'Source changed during publication; last-good output retained')
+    unchanged()
+    folder, payloads = prepare(docs, args.output_root)
+    lock = None
+    staged = []
+    try:
+        if args.publish:
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock = os.open(folder.parent / '.a0-widgets-A0.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            info = os.fstat(lock)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1, 'Unsafe writer lock')
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError('Another widget producer is publishing; retry later') from None
+            folder, payloads = prepare(docs, args.output_root)
+        changed = [p for p, data in payloads.items() if not p.exists() or p.read_bytes() != data]
+        if args.publish:
+            # Validate all sources/destinations first; atomically replace each file.
+            # A filesystem failure can leave a mixed generation, never partial JSON.
+            for target in changed:
+                fd, name = tempfile.mkstemp(prefix='.a0-widgets-', dir=folder)
+                staged.append((name, target))
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(payloads[target]); stream.flush(); os.fsync(stream.fileno())
+            unchanged()
+            for name, target in staged:
+                os.replace(name, target)
+        return dict(ok=True, mode='published' if args.publish else 'dry-run', widgets=len(docs), changed=len(changed),
+                    sourceCount=len(sources), sourceDigest=hashlib.sha256(encode(sources)).hexdigest(),
+                    files=[dict(id=p.stem, sha256=hashlib.sha256(data).hexdigest(), bytes=len(data)) for p,data in payloads.items()])
+    finally:
+        for name, _ in staged:
+            if os.path.exists(name):
+                os.unlink(name)  # Only incomplete temporary files from this invocation.
+        if lock is not None:
+            os.close(lock)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--output-root', type=Path, required=True, help='Widget root (A0 is appended); no implicit live path')
+    parser.add_argument('--source-guard', type=Path, help='Expected path-to-SHA256 map including manifest; refuse changed sources')
+    parser.add_argument('--read-only-actions', action='store_true', help='Publish data without action controls until the item-safe consumer is deployed')
+    parser.add_argument('--publish', action='store_true', help='Explicitly write atomic files; default only validates and summarizes')
+    args = parser.parse_args()
+    try:
+        print(json.dumps(run(args), sort_keys=True))
+    except (ValueError, OSError, TypeError, KeyError, AttributeError) as error:
+        # Never echo paths, input lines, private payloads or JSON decoder excerpts.
+        message = str(error) if type(error) is ValueError else 'Source or output unavailable or malformed'
+        print(json.dumps(dict(ok=False, error=message)), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

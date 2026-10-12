@@ -5,14 +5,20 @@
 # Shaan, 2 Oct: "If we move agent 0 over to SDK, I swear none of these issues continue happening".
 #   a0-sdk --resume ID [-n A0]      what the keep-alive runs
 #   a0-sdk [--model M] [--effort E] "first prompt"
-# Moved here from siso-firstmate/bin-az/a0-sdk; the login is claude-siso-3 (fuzeheritage's ~/.claude-siso is off since 3 Oct).
+# Moved here from siso-firstmate/bin-az/a0-sdk. Login: ~/.local/state/a0/login (bin/a0-switch-login), default claude-siso-3.
 set -euo pipefail
 
-export CLAUDE_CONFIG_DIR="$HOME/.config/claude-siso-3"
-export SISO_A0=1            # no early auto-compact for Agent Zero
+# The login: A0_CONFIG_DIR, else the one a0-switch-login recorded (so the keep-alive relaunches on it too), else claude-siso-3.
+# Shaan, 8 Oct ~05:30: "how can we move this agent 0 over to the other plan and still have it read all the conversation".
+login_file="$HOME/.local/state/a0/login"
+export CLAUDE_CONFIG_DIR="${A0_CONFIG_DIR:-$( [ -s "$login_file" ] && head -1 "$login_file" || echo "$HOME/.config/claude-siso-3" )}"
+export SISO_A0=1
 export FM_ALLOW_SUBAGENT=1
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
-unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES
+# Shaan, 7 Oct 18:35: "I even want agent zero to auto compact as well ... at 30%. I feel like otherwise I just let it run and
+# then it gets way too expensive." Reverses the 1 Oct no-early-compact rule for Agent Zero.
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=40  # Shaan, 9 Oct ~00:45: "agents get pushed to autocompact way too early ... we gotta bump parameters" (was 35; 30 before 8 Oct)
 
 B="$HOME/SISO_Workspace/SISO_Agents/siso-harness-lab/bin"
 # shellcheck source=/dev/null
@@ -37,6 +43,8 @@ while (($#)); do
 done
 [[ " ${out[*]-} " == *" --model "* ]] || out+=(--model "${A0_MODEL:-claude-opus-5-5[1m]}")
 [[ " ${out[*]-} " == *" --name "* ]] || out+=(--name A0)
+# Shaan, 8 Oct ~08:30: "Can we change your reasoning to extra high please? Because you keep on thinking way too heavy" (was max, 7 Oct).
+[[ " ${out[*]-} " == *" --effort "* ]] || out+=(--effort "${A0_EFFORT:-xhigh}")
 
 cd "$(dirname "$(dirname "$(readlink -f "$0")")")"   # Agent Zero runs from its own repo
 exec "$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host" \

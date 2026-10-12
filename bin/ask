@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""ask: Shaan's asks, one place, pulled by the owner that builds them (ADR 0004).
+
+Shaan, 6 Oct: "there should be a spec location where all of the stuff we write gets dropped in a place, tracked in the state
+... that the agent-based builder always knows to check, and he can check multiple tickets at once and see if they can be done
+in one run ... understand the nuance on their timestamps ... newer specs might supersede other stuff unless agent zero disagrees".
+
+An ask is a task (bin/a0-task, tasks/t-NNNN.json) whose links.spec points to a spec file holding his words verbatim and what
+Agent Zero decided they mean. Nothing pings the builder: it runs `ask queue <OWNER>` at the start of every round.
+
+  ask new --project P --owner O --his "<his words>" "<title>" [--touches a,b] [--supersedes t-1,t-2] [--spec FILE]
+      Writes asks/<project>/<YYYY-MM-DD-HHMM>-<slug>.md (or links an existing --spec file) and creates the task (stage specced).
+  ask queue OWNER [--json]
+      The owner's open asks, oldest first, with superseded ones folded under their replacement and overlaps
+      (same `touches` area) grouped, so one run can take a batch and newer words win.
+  ask done ID [ID...] --evidence "<sha, URL, before/after shots>"
+      Moves each to live with the evidence (no approval step: ADR 0005).
+"""
+import argparse, datetime, json, os, re, subprocess, sys
+from pathlib import Path
+
+HOME = Path(__file__).resolve().parent.parent
+TASKS = HOME / "tasks"
+ASKS = HOME / "asks"
+A0TASK = HOME / "bin" / "a0-task"
+OPEN = {"specced", "allocated", "building", "built", "tested", "rework", "feedback"}
+
+
+def run(*args):
+    out = subprocess.run([str(A0TASK), *args], capture_output=True, text=True)
+    if out.returncode:
+        sys.exit(out.stderr.strip() or out.stdout.strip())
+    return out.stdout
+
+
+def tasks():
+    for f in sorted(TASKS.glob("t-*.json")):
+        try:
+            yield json.loads(f.read_text())
+        except Exception:
+            continue
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:48]
+
+
+def cmd_new(a):
+    now = datetime.datetime.now().astimezone()
+    if a.spec:
+        spec = Path(a.spec).expanduser().resolve()
+        if not spec.exists():
+            sys.exit(f"no such spec: {spec}")
+    else:
+        d = ASKS / slug(a.project)
+        d.mkdir(parents=True, exist_ok=True)
+        spec = d / f"{now:%Y-%m-%d-%H%M}-{slug(a.title)}.md"
+        spec.write_text(
+            f"# {a.title}\n\n**Project:** {a.project} · **Owner:** {a.owner} · **At:** {now:%Y-%m-%d %H:%M %z}\n\n"
+            f"## His words (verbatim)\n> {a.his}\n\n## What it means (Agent Zero)\n{a.means or '- '}\n\n"
+            f"## Done when\n- He can open one URL and see it (before/after shots for UI).\n")
+    out = run("add", a.title, "--his", a.his, "--project", a.project, "--owner", a.owner, "--stage", "specced")
+    tid = re.search(r"t-\d+", out).group(0)
+    fields = [f"links.spec={spec}"]
+    if a.touches:
+        fields.append(f"touches={a.touches}")
+    if a.supersedes:
+        fields.append(f"supersedes={a.supersedes}")
+    run("set", tid, *fields, "--by", "A0")
+    for old in filter(None, (a.supersedes or "").split(",")):
+        run("set", old.strip(), f"next={tid}", "--by", "A0")
+    print(f"{tid} {spec}")
+
+
+def cmd_queue(a):
+    allt = list(tasks())
+    mine = [t for t in allt if (t.get("owner") or "").upper() == a.owner.upper() and t.get("stage") in OPEN]
+    superseded_by = {}
+    for t in allt:
+        for old in t.get("supersedes") or []:
+            superseded_by[old] = t["id"]
+    live, folded = [], {}
+    for t in sorted(mine, key=lambda t: t.get("created") or ""):
+        if t["id"] in superseded_by:
+            folded.setdefault(superseded_by[t["id"]], []).append(t)
+        else:
+            live.append(t)
+    groups = {}
+    for t in live:
+        key = ",".join(sorted(t.get("touches") or [])) or "(no area set)"
+        groups.setdefault(key, []).append(t)
+    if a.json:
+        print(json.dumps({"owner": a.owner, "groups": [
+            {"touches": k, "asks": [{"id": t["id"], "title": t["title"], "created": t.get("created"),
+                                     "stage": t["stage"], "spec": (t.get("links") or {}).get("spec"),
+                                     "supersedes": [o["id"] for o in folded.get(t["id"], [])]} for t in v]}
+            for k, v in groups.items()]}, indent=2, ensure_ascii=False))
+        return
+    ideas = sum(1 for t in allt if (t.get("owner") or "").upper() == a.owner.upper() and t.get("stage") == "thought")
+    if ideas:
+        print(f"({ideas} ideas at stage thought are not in the queue until Agent Zero specs them: a0-task list --stage thought)")
+    if not live:
+        print(f"{a.owner}: nothing open.")
+        return
+    print(f"{a.owner}: {len(live)} open asks in {len(groups)} areas (oldest first; newer words win where they overlap)\n")
+    for k, v in groups.items():
+        print(f"[{k}]")
+        for t in v:
+            print(f"  {t['id']}  {(t.get('created') or '')[:16]}  {t['stage']:<9} {t['title']}")
+            spec = (t.get("links") or {}).get("spec")
+            if spec:
+                print(f"           spec: {spec}")
+            for o in folded.get(t["id"], []):
+                print(f"           supersedes {o['id']} ({(o.get('created') or '')[:16]}): {o['title']}")
+        print()
+
+
+def cmd_done(a):
+    for tid in a.ids:
+        run("move", tid, "live", "--evidence", a.evidence, "--by", a.by)
+        print(f"{tid} live")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s = p.add_subparsers(dest="cmd", required=True)
+    n = s.add_parser("new")
+    n.add_argument("title")
+    n.add_argument("--project", required=True)
+    n.add_argument("--owner", required=True)
+    n.add_argument("--his", required=True)
+    n.add_argument("--means")
+    n.add_argument("--touches")
+    n.add_argument("--supersedes")
+    n.add_argument("--spec")
+    q = s.add_parser("queue")
+    q.add_argument("owner")
+    q.add_argument("--json", action="store_true")
+    d = s.add_parser("done")
+    d.add_argument("ids", nargs="+")
+    d.add_argument("--evidence", required=True)
+    d.add_argument("--by", default=os.environ.get("A0_BY", "owner"))
+    a = p.parse_args()
+    {"new": cmd_new, "queue": cmd_queue, "done": cmd_done}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

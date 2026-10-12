@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""owner-compact PANE [--no-checkpoint]: compact one hosted Opus owner at a clean break.
+1. asks it (a0-tell) to write its HANDOFF checkpoint and stop at a clean break;
+2. waits until it has worked and gone idle;
+3. sends /compact (--sync), waits for ctx below 15%;
+4. sends "resume from your HANDOFF checkpoint".
+Run it in the background; it logs one line per step. ADR 0001: owners compact at about 30%."""
+import json, os, subprocess, sys, time
+pane = sys.argv[1]; skip_cp = '--no-checkpoint' in sys.argv
+here = os.path.dirname(os.path.abspath(__file__))
+host = os.path.expanduser(f"~/.local/state/agent-base/hosts/{pane.replace(':','_')}.json")
+def read():
+    try:
+        d = json.load(open(host)); return d.get('state'), (d.get('ctx') or {}).get('pct')
+    except Exception: return None, None
+def tell(msg, sync=False):
+    cmd = [os.path.join(here, 'a0-tell')] + (['--sync'] if sync else []) + [pane, msg]
+    print(subprocess.run(cmd, capture_output=True, text=True).stdout.strip().splitlines()[-1:], flush=True)
+def wait(cond, limit):
+    t = time.time()
+    while time.time() - t < limit:
+        s, c = read()
+        if cond(s, c): return s, c
+        time.sleep(10)
+    print('timeout', read(), flush=True); sys.exit(2)
+s, c = read(); print('start', s, c, flush=True)
+if not skip_cp:
+    tell("A0: you're at %s%% context. Finish your current step, write your .agents/HANDOFF.md checkpoint (done, next, open threads, key paths), then stop and end your turn; I'll compact you and you'll resume from it." % c)
+    wait(lambda s, c: s == 'working', 600)
+wait(lambda s, c: s == 'idle', 5400)
+time.sleep(5); s, c = wait(lambda s, c: s == 'idle', 60)
+print('compacting at', c, flush=True); tell('/compact', sync=True)
+wait(lambda s, c: s == 'idle' and c is not None and c < 15, 1800)
+tell("A0: compacted. Read your .agents/HANDOFF.md checkpoint and carry on.")
+print('done', read(), flush=True)

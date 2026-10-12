@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""owners-revive [--dry-run]: after a reboot or a herdr restart, put every hosted owner chat back in its own pane, under
+siso-host, on its own login and its own session. Run by herdr-restore-on-login once herdr is up; safe to run by hand.
+8 Oct 19:00 (laptop hard-reset at 18:51): herdr came back with every owner pane bare, herdr-restore skipped them because
+herdr still remembered their old session, and herdr's own auto-resume then started plain `claude --resume` on whatever
+login the herdr server inherited (claude-siso-3) instead of the host record's (~/.claude-siso). Recovery was by hand.
+A pane is revived when its host record's process is dead and the pane runs nothing but a shell, or only a plain
+`claude --resume <the same session>` that herdr started (stopped first: it is outside Agent Base and maybe the wrong login).
+Agent Zero's own pane is left to a0-keepalive. Stopped owners with a pane are revived too: they were live chats before."""
+import glob, json, os, subprocess, sys, time
+HOME = os.path.expanduser("~")
+HOSTS = f"{HOME}/.local/state/agent-base/hosts"
+HOST = f"{HOME}/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
+DRY = "--dry-run" in sys.argv
+
+def alive(pid):
+    try: os.kill(int(pid or 0), 0); return bool(pid)
+    except (OSError, ValueError): return False
+
+def herdr(*a):
+    r = subprocess.run(["herdr", *a], capture_output=True, text=True)
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+
+panes = {p["pane_id"] for p in ((herdr("pane", "list") or {}).get("result") or {}).get("panes", [])}
+if not panes: sys.exit("owners-revive: herdr is not running")
+# Newest record per pane; a pane whose newest record is alive is already fine.
+recs = {}
+for f in glob.glob(f"{HOSTS}/w*_p*.json"):
+    try: d = json.load(open(f))
+    except Exception: continue
+    if d.get("pane") and d.get("session") and (d.get("harness") or "claude") == "claude":
+        if d["pane"] not in recs or int(d.get("updatedAt") or 0) > int(recs[d["pane"]].get("updatedAt") or 0): recs[d["pane"]] = d
+# Live hosts rewrite their record every minute or so, so the ones running at the crash sit within minutes of the newest
+# record; older ones (a chat stopped days ago in a pane that still exists) are left stopped. One pane per name: the newest.
+upd = lambda d: int(d.get("updatedAt") or 0)
+last = max(map(upd, recs.values()), default=0)
+newest = {}
+for d in recs.values():
+    if upd(d) > upd(newest.get(d.get("name"), {})): newest[d.get("name")] = d
+for pane, d in sorted(recs.items()):
+    if d.get("name") == "A0" or pane not in panes or alive(d.get("pid")): continue
+    if upd(d) < last - 15 * 60_000 or newest.get(d.get("name")) is not d: continue
+    fg = (((herdr("pane", "process-info", "--pane", pane) or {}).get("result") or {}).get("process_info") or {}).get("foreground_processes", [])
+    progs = [x for x in fg if not os.path.basename((x.get("argv") or [""])[0]).lstrip("-").endswith(("zsh", "bash", "sh"))]
+    stray = [x for x in progs if "--resume" in (x.get("argv") or []) and d["session"] in (x.get("argv") or [])
+             and not any("siso-host" in a or "host.ts" in a for a in x.get("argv") or [])]
+    if progs and len(stray) != len(progs):
+        print(f"{d['name']:<14} {pane}: busy with something else, left alone"); continue
+    cfg = d.get("configDir") or f"{HOME}/.claude-siso"
+    try: at = json.load(open(f"{HOME}/.local/state/a0/compact-at.json")).get(d["name"])  # set by compact-at
+    except Exception: at = None
+    cmd = (f"cd '{d['cwd']}' && CLAUDE_CONFIG_DIR={cfg} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={at or '${A0_COMPACT_PCT:-35}'} {HOST} --keep-herdr-env "
+           f"--permission-mode bypassPermissions --name '{d['name']}' --model '{d.get('model') or 'claude-opus-5-5[1m]'}' --resume {d['session']}")
+    print(f"{d['name']:<14} {pane}: {'would stop herdr resume, then ' if stray else ''}{'would relaunch' if DRY else 'relaunching'} {d['session'][:8]} on {cfg}")
+    if DRY: continue
+    for x in stray:
+        try: os.kill(int(x["pid"]), 15)
+        except Exception: pass
+    for _ in range(15):
+        if not any(alive(x.get("pid")) for x in stray): break
+        time.sleep(1)
+    subprocess.run(["herdr", "pane", "send-keys", pane, "ctrl+c"], capture_output=True); time.sleep(0.5)
+    subprocess.run(["herdr", "pane", "run", pane, cmd], capture_output=True)
+    time.sleep(3)

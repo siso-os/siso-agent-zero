@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""owners: every hosted chat on one screen. Name, pane, running now or idle, context %, and its owner card (status, step,
+link, age). Agent Zero runs this first after a compaction and before any fan-out (ADR 0001, 0002).
+  owners          owners with a card or a live host
+  owners --all    every host record, including old helper chats
+  owners --json"""
+import json, os, sys, time, datetime
+from pathlib import Path
+HOSTS = Path.home() / ".local/state/agent-base/hosts"
+CARDS = Path.home() / ".local/state/a0/owners"
+REG = Path.home() / ".local/state/agent-base/registry.json"
+
+def age(iso):
+    try:
+        t = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+        m = int((time.time() - t) / 60)
+        return f"{m}m" if m < 120 else f"{m // 60}h"
+    except Exception:
+        return "-"
+
+reg = {}
+try: reg = json.loads(REG.read_text()).get("agents", {})
+except Exception: pass
+rows = {}
+for f in sorted(HOSTS.glob("w*_p*.json")):
+    try: d = json.loads(f.read_text())
+    except Exception: continue
+    n = d.get("name")
+    if not n: continue
+    # 7 Oct: hosts died with ENOSPC while their record still said "working"; trust the process, not the label.
+    try: os.kill(int(d.get("pid") or 0), 0); alive = bool(d.get("pid"))
+    except (OSError, ValueError): alive = False
+    if n in rows and rows[n]["alive"] and not alive: continue
+    rows[n] = {"name": n, "pane": f.stem.replace("_", ":"), "state": (d.get("state") or "-") if alive else "DEAD",
+               "ctx": (d.get("ctx") or {}).get("pct"), "kind": (reg.get(n) or {}).get("kind", ""), "alive": alive}
+for f in sorted(CARDS.glob("*.json")):
+    if f.stem.startswith("_"): continue
+    try: c = json.loads(f.read_text())
+    except Exception: continue
+    r = rows.setdefault(f.stem, {"name": f.stem, "pane": "-", "state": "no host", "ctx": None, "kind": ""})
+    r.update(card=c.get("status"), step=(c.get("subtitle") or "")[:70], page=c.get("page"), age=age(c.get("updated") or ""))
+show = [r for r in rows.values() if "--all" in sys.argv or "card" in r]
+show.sort(key=lambda r: (r["state"] != "working", r["name"]))
+if "--json" in sys.argv:
+    print(json.dumps(show, indent=2)); sys.exit()
+for r in show:
+    ctx = f"{r['ctx']}%" if r["ctx"] is not None else "-"
+    hot = " !" if isinstance(r["ctx"], (int, float)) and r["ctx"] >= 30 else ""
+    print(f"{r['name']:<13} {r['pane']:<7} {r['state']:<8} ctx {ctx:>4}{hot:<2} {r.get('card') or '-':<9} {r.get('age','-'):>4}  {r.get('step','')}")
+    if r.get("page"): print(f"{'':>13} {r['page']}")

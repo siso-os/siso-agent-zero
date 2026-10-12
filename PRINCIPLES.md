@@ -41,6 +41,9 @@ words to live; his minutes spent on the machine (restarts, relaying, testing, de
 10. **Effort scales by rule.** Default one job. More only when the work splits into independent pieces. Entropy is
     permanent: small recurring cleanup jobs, not cleanup days.
 11. **Shaan is the outer loop: taste and direction.** See below.
+12. **Reason from the budget; no hard caps.** Before any fan-out, look at the plan window left and the laptop's load, script
+    what a script can fetch, batch the rest, and write the call in one line. A wrong call is fixed in the reasoning, never with
+    a cap (Shaan, 6 Oct). `docs/adr/0001-reason-from-the-budget-not-caps.md`.
 
 ## The human loop (Shaan, 3 Oct ~21:00: "the biggest steps in innovation i've seen when we have human in the loop feedback")
 Two loops. The inner loop is machines: generate, check, critique, refine; fast and cheap, as many rounds as it takes. The

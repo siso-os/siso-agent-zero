@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""owner-switch-login NAME|PANE [CONFIG_DIR] [--then "text"]: move one hosted owner chat to another Claude login, same conversation.
+
+Shaan, 8 Oct ~08:45: "the SISO landing pages on the old Claude account, you need to respawn him on the fresh Claude account,
+same with any other agents that you spawn up, very important you do that". CONFIG_DIR defaults to ~/.claude-siso (fuzeheritage).
+
+A conversation is <config>/projects/<cwd folder>/<session>.jsonl plus a <session>/ folder. This stops the host (its pid is in
+the host record), moves those into the new login's projects folder (a rename on the same disk: no second copy), and resumes
+the session in the same pane on the new login. If the relaunch command fails, the files move back. --then queues one line
+into the resumed chat (a0-tell), for the instruction the stop interrupted. Agent Zero itself moves with a0-switch-login.
+"""
+import glob, json, os, shutil, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+HOSTS = f"{HOME}/.local/state/agent-base/hosts"
+HOST = f"{HOME}/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
+HERE = os.path.dirname(os.path.abspath(__file__))
+args = [a for a in sys.argv[1:]]
+then = None
+if "--then" in args:
+    i = args.index("--then"); then = args[i + 1]; del args[i:i + 2]
+compact = None  # --compact PCT: relaunch with this autocompact point (same login is fine), remembered per agent
+if "--compact" in args:
+    i = args.index("--compact"); compact = int(args[i + 1]); del args[i:i + 2]
+now = "--now" in args
+if now: args.remove("--now")
+SETTINGS = f"{os.path.expanduser('~')}/.local/state/a0/compact-at.json"
+who = args[0]
+new = os.path.abspath(os.path.expanduser(args[1] if len(args) > 1 else "~/.claude-siso"))
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0); return True
+    except Exception:
+        return False
+# A name can have stale records from old panes: take the live host, newest first.
+recs = [d for d in (json.load(open(f)) for f in glob.glob(f"{HOSTS}/w*_p*.json"))
+        if who in (d.get("name"), d.get("pane")) and alive(d.get("pid") or 0)]
+if not recs:
+    sys.exit(f"no live host for {who}")
+rec = max(recs, key=lambda d: int(d.get("updatedAt") or 0))
+if len(recs) > 1:
+    print(f"{who}: {len(recs)} live hosts ({', '.join(d['pane'] for d in recs)}); moving the newest, {rec['pane']}")
+name, pane, session, cwd = rec["name"], rec["pane"], rec["session"], rec["cwd"]
+old = rec.get("configDir") or f"{HOME}/.config/claude-siso-3"
+same = os.path.realpath(old) == os.path.realpath(new)
+if same and compact is None:
+    print(f"{name}: already on {new}"); sys.exit(0)
+try: saved = json.load(open(SETTINGS))
+except Exception: saved = {}
+if compact is not None:
+    saved[name] = compact; os.makedirs(os.path.dirname(SETTINGS), exist_ok=True); json.dump(saved, open(SETTINGS, "w"), indent=1)
+pct = saved.get(name)
+# Never cut a turn short: wait (up to 30 min) until the chat is idle, unless --now.
+if not now:
+    for _ in range(180):
+        try:
+            if json.load(open(f"{HOSTS}/{rec['pane'].replace(':', '_')}.json")).get("state") == "idle": break
+        except Exception: break
+        time.sleep(10)
+slug = "-" + os.path.realpath(cwd).lstrip("/").replace("/", "-").replace("_", "-")
+src = next(iter(sorted(glob.glob(f"{old}/projects/*/{session}.jsonl"), key=os.path.getmtime, reverse=True)), None)
+if not src:
+    sys.exit(f"{name}: no {session}.jsonl under {old}/projects")
+srcdir, dstdir = os.path.dirname(src), (os.path.dirname(src) if same else f"{new}/projects/{slug}")
+os.makedirs(dstdir, exist_ok=True)
+if not same and os.path.exists(f"{dstdir}/{session}.jsonl"):
+    # A leftover copy there (a stub the app wrote after the last move, or an older copy) blocked two switches back (8 and
+    # 9 Oct). The live conversation is the source; if the leftover is smaller and older, set it aside, never delete it.
+    left = f"{dstdir}/{session}.jsonl"
+    if os.path.getsize(left) < os.path.getsize(src) and os.path.getmtime(left) < os.path.getmtime(src):
+        aside = f"{left}.stale-{time.strftime('%Y%m%d-%H%M')}"
+        os.rename(left, aside)
+        print(f"{name}: an older, smaller copy was in the way; set aside as {os.path.basename(aside)}")
+    else:
+        sys.exit(f"{name}: {left} already exists and is not an older, smaller copy; not overwriting")
+
+pid = int(rec.get("pid") or 0)
+if pid:
+    try:
+        os.kill(pid, 15)
+        for _ in range(30):
+            os.kill(pid, 0); time.sleep(1)
+    except ProcessLookupError:
+        pass
+moved = []
+for s, d in ([] if same else [(src, f"{dstdir}/{session}.jsonl"), (f"{srcdir}/{session}", f"{dstdir}/{session}")]):
+    if os.path.exists(s):
+        shutil.move(s, d); moved.append((s, d))
+model = rec.get("model") or "claude-opus-5-5[1m]"
+cmd = (f"cd '{cwd}' && CLAUDE_CONFIG_DIR={new} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct if pct else '${A0_COMPACT_PCT:-40}'} {HOST} --keep-herdr-env "
+       f"--permission-mode bypassPermissions --name '{name}' --model '{model}' --resume {session}")
+# A compaction waiter can type into the pane after the host exits, leaving a half line at the shell prompt that turns
+# the relaunch into a zsh parse error (SISO-AGENCY, 8 Oct): clear the line first.
+time.sleep(2)
+subprocess.run(["herdr", "pane", "send-keys", pane, "ctrl+c"], capture_output=True)
+r = subprocess.run(["herdr", "pane", "run", pane, cmd], capture_output=True, text=True)
+if r.returncode != 0:
+    for s, d in reversed(moved):
+        shutil.move(d, s)
+    sys.exit(f"{name}: relaunch failed ({r.stderr.strip()[:300]}); conversation moved back to {old}")
+# wait for the new host to write its record on the new login
+for _ in range(60):
+    try:
+        d = json.load(open(f"{HOSTS}/{pane.replace(':', '_')}.json"))
+        if os.path.realpath(d.get("configDir") or "") == os.path.realpath(new) and d.get("session") == session:
+            break
+    except Exception:
+        pass
+    time.sleep(2)
+else:
+    sys.exit(f"{name}: FAIL, no host came up in {pane} on {new} after 120 s (read the pane: herdr pane read {pane}); "
+             f"the conversation is in {dstdir}")
+if then:
+    subprocess.run([f"{HERE}/host-tell", pane, then])
+what = f"autocompact now {pct}%" if same else f"moved to {new}"
+print(f"{name}: {what} ({os.path.getsize(f'{dstdir}/{session}.jsonl') // 1_000_000} MB conversation), resumed in {pane}")

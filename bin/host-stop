@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# host-stop <pane> [go]: list (dry run) or stop every running sub-agent and background job inside one hosted chat, then
+# interrupt its turn. It talks to the chat's Agent Base host socket (port and token from its host record) with the host's own
+# stop_task and interrupt commands. Proven 6 Oct 23:15 on UI-HUB (15 Sonnets + 5 jobs -> 0 running).
+# Escape via herdr does not reach a hosted chat; this does. Use it only when a chat's spend is clearly wrong (ADR 0001).
+set -euo pipefail
+pane=${1:?usage: host-stop <pane w7:pNN> [go]}; mode=${2:-}
+rec="$HOME/.local/state/agent-base/hosts/${pane/:/_}.json"; [ -f "$rec" ] || { echo "no host record: $rec"; exit 1; }
+WS_DIR="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host"
+cd "$WS_DIR"
+REC="$rec" MODE="$mode" node --input-type=module -e '
+import WebSocket from "ws"; import fs from "fs";
+const h = JSON.parse(fs.readFileSync(process.env.REC)); const go = process.env.MODE === "go";
+const ws = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${h.token}`); const tasks = new Map();
+ws.on("message", b => { let m; try { m = JSON.parse(b) } catch { return }
+  const scan = o => { if (!o || typeof o !== "object") return; if (Array.isArray(o)) return o.forEach(scan);
+    if (typeof o.id === "string" && (o.status || o.state) && (o.kind || o.type || o.description || o.label)) tasks.set(o.id, { s: o.status || o.state, d: String(o.description || o.label || o.kind || "").slice(0, 60) });
+    for (const v of Object.values(o)) if (v && typeof v === "object") scan(v); }; scan(m); });
+ws.on("open", () => setTimeout(() => {
+  const live = [...tasks].filter(([, t]) => !/done|complete|stopped|failed|cancel/i.test(t.s));
+  console.log(`${h.name || ""}: ${live.length} running`); for (const [id, t] of live) { console.log(` ${go ? "stop" : "    "} ${id} ${t.d}`); if (go) ws.send(JSON.stringify({ t: "stop_task", id })); }
+  if (go) ws.send(JSON.stringify({ t: "interrupt" })); setTimeout(() => process.exit(0), 1500); }, 3000));
+ws.on("error", e => { console.log("error", e.message); process.exit(1) });'

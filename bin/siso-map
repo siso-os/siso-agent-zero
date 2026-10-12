@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""siso-map: the whole of SISO on one page, projects > sub-projects > the owner of each, with live state, what each owner
+last said (its card) and its queue of asks (his task list per sub-project). Data: docs/maps/siso.json, kept by Agent Zero.
+Shaan, 8 Oct ~22:25: "figure out how this all fits together ... put in a way where I can see it and we can work with it and
+improve it ... I should have a task list for that agent-based project ... see what's queued".
+  siso-map            build and post to the console (stable URL http://127.0.0.1:8891/card/SISO-MAP/html)
+  siso-map --out F    write the HTML to F only
+Read-only: it never writes to owners, hosts or asks. Retire the page once Agent Base's nav renders the same data (t-0563)."""
+import glob, html, json, os, subprocess, sys, time
+
+Z = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOSTS = os.path.expanduser("~/.local/state/agent-base/hosts")
+CARDS = os.path.expanduser("~/.local/state/a0/owners")
+M = json.load(open(f"{Z}/docs/maps/siso.json"))
+e = lambda s: html.escape(str(s or ""))
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0); return True
+    except Exception:
+        return False
+
+
+def host(name):
+    """The newest live host for an owner: local by pid, Mac mini records by a heartbeat in the last 15 minutes."""
+    best = None
+    for f in glob.glob(f"{HOSTS}/*.json"):
+        try:
+            d = json.load(open(f))
+        except Exception:
+            continue
+        if d.get("name") != name:
+            continue
+        remote = os.path.basename(f).startswith("remote-")
+        u = d.get("updatedAt") or 0
+        u = u / 1000 if u > 1e12 else u
+        if (remote and time.time() - u > 900) or (not remote and not alive(d.get("pid") or 0)):
+            continue
+        if not best or u > best[0]:
+            best = (u, d)
+    return best[1] if best else None
+
+
+def card(name):
+    try:
+        return json.load(open(f"{CARDS}/{name}.json"))
+    except Exception:
+        return {}
+
+
+def queue(name):
+    try:
+        out = subprocess.run([f"{Z}/bin/ask", "queue", name, "--json"], capture_output=True, text=True, timeout=30).stdout
+        return json.loads(out).get("groups", [])
+    except Exception:
+        return []
+
+
+def row(s, kind="sub"):
+    o = s.get("owner")
+    h = host(o) if o else None
+    c = card(o) if o else {}
+    first = o not in SEEN; SEEN.add(o)  # an owner's card and task list show once, on its first sub-project
+    q = queue(o) if o and kind == "sub" and first else []
+    c = c if first else {}
+    n = sum(len(g.get("asks", [])) for g in q)
+    st = (h or {}).get("state") or ("paused" if s.get("paused") else ("no owner" if not o else "not running"))
+    dot = {"working": "#3ecf8e", "idle": "#8a8f98"}.get(st, "#4a4540")
+    ctx = (h or {}).get("ctx") or {}
+    mach = (h or {}).get("machine") or s.get("machine") or "laptop"
+    links = c.get("links") or []
+    links = list(links.values()) if isinstance(links, dict) else links
+    ls = [l for l in links if isinstance(l, dict) and l.get("url")][:3]
+    live = f'<a href="{e(s["live"])}">open</a>' if s.get("live") else ""
+    face = e((o or s["name"])[:2])
+    summ = c.get("summary") or s.get("what") or ""
+    note = s.get("paused") or s.get("note") or ""
+    out = [f'<div class="row"><span class="face">{face}</span><span class="dot" style="background:{dot}"></span>'
+           f'<span class="name">{e(s["name"])}</span><span class="who">{e(o or "")}</span>'
+           + (f'<span class="chip">Mac mini</span>' if mach == "mini" else "")
+           + f'<span class="st">{e(st)}{" · " + str(ctx.get("pct")) + "%" if ctx.get("pct") is not None else ""}</span>'
+           + (f'<span class="n">{n} queued</span>' if n else "")
+           + f'<span class="live">{live}</span></div>']
+    sub = f'<div class="what">{e(summ[:260])}{" · <i>" + e(note) + "</i>" if note else ""}'
+    sub += "".join(f' · <a href="{e(l["url"])}">{e(l.get("label") or "link")}</a>' for l in ls) + "</div>"
+    out.append(sub)
+    if n:
+        items = []
+        for g in q:
+            for a in g.get("asks", []):
+                items.append(f'<li><code>{e(a["id"])}</code> {e(a.get("title", "")[:170])}'
+                             f' <span class="stage">{e(a.get("stage", ""))}</span></li>')
+        out.append(f'<details><summary>Task list: {n} queued for {e(o)}</summary><ol>{"".join(items)}</ol></details>')
+    return "".join(out)
+
+
+body, SEEN = [], set()
+for p in M["projects"]:
+    body.append(f'<section><h2>{e(p["name"])}</h2><p class="pw">{e(p.get("what"))}</p>')
+    body += [row(s) for s in p.get("subs", [])]
+    if p.get("helpers"):
+        body.append('<h3>Helpers (serve any sub-project; shown here, not as projects)</h3>')
+        body += [row({**hp, "owner": hp["name"], "name": hp["name"].title().replace("-", " ")}, "helper") for hp in p["helpers"]]
+    body.append("</section>")
+
+page = f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>SISO map</title><style>
+body{{background:#141210;color:#e8e2da;font:14px/1.45 -apple-system,Inter,sans-serif;margin:0;padding:28px 20px 60px}}
+main{{max-width:980px;margin:0 auto}} h1{{font-size:22px;margin:0 0 4px}} .sub{{color:#9a928a;margin:0 0 22px}}
+section{{background:#1c1916;border:1px solid #2e2924;border-radius:12px;padding:14px 16px 10px;margin:0 0 16px}}
+h2{{font-size:16px;margin:0}} h3{{font-size:12px;color:#9a928a;font-weight:500;margin:14px 0 4px;text-transform:uppercase;letter-spacing:.04em}}
+.pw{{color:#9a928a;margin:2px 0 8px}} a{{color:#f5a524;text-decoration:none}} a:hover{{text-decoration:underline}}
+.row{{display:flex;align-items:center;gap:8px;padding:7px 0 0;border-top:1px solid #2a2520;margin-top:6px}}
+.face{{width:20px;height:20px;border-radius:50%;background:#2e2924;font-size:9px;display:grid;place-items:center;color:#cfc6bc;flex:none}}
+.dot{{width:7px;height:7px;border-radius:50%;flex:none}} .name{{font-weight:600}} .who{{color:#9a928a;font-size:12px}}
+.chip{{font-size:11px;padding:1px 7px;border-radius:9px;background:#2b2440;color:#c9b8ff}}
+.st{{color:#9a928a;font-size:12px;margin-left:auto}} .n{{font-size:12px;color:#f5a524}} .live{{font-size:12px;min-width:34px;text-align:right}}
+.what{{color:#b8afa5;font-size:12.5px;margin:2px 0 4px 35px}} details{{margin:2px 0 6px 35px}} summary{{cursor:pointer;color:#f5a524;font-size:12.5px}}
+ol{{margin:6px 0 4px;padding-left:22px}} li{{margin:2px 0;font-size:12.5px}} code{{color:#9a928a;font-size:11.5px}} .stage{{color:#6f675f;font-size:11px}}
+</style><main><h1>SISO map</h1><p class=sub>Projects, their sub-projects and the one agent that owns each, with each owner's task list.
+Built {time.strftime('%d %b %H:%M')} from <code>docs/maps/siso.json</code> (Agent Zero keeps it; rebuild: <code>bin/siso-map</code>).</p>
+{''.join(body)}</main>"""
+
+if "--out" in sys.argv:
+    open(sys.argv[sys.argv.index("--out") + 1], "w").write(page)
+else:
+    r = subprocess.run(["console-post", "-a", "A0", "-k", "html", "-i", "SISO-MAP", "-t", "SISO map", "-"], input=page,
+                       capture_output=True, text=True)
+    print((r.stdout or r.stderr).strip()[:200]); print("http://127.0.0.1:8891/card/SISO-MAP/html")
