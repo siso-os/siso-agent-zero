@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""login-failover [--dry]: when a seat's Claude login runs out of usage, move it to the other login so it carries on.
+
+Shaan, 12 Oct ~07:45: "when the weekly limit gets used up on the Lord's Sosodier account maybe it goes over to the Fuse
+Heritage account ... You can swap over the halo agent and the ui hub agent to carry on doing what they were doing if they
+run out of usage". launchd com.siso.login-failover runs this every 2 min. It costs no tokens and tells nobody: one line in
+~/.local/state/a0/login-failover.log when something changes.
+
+Each seat's host record carries its login's live usage (rateLimits: five_hour and seven_day, used %). The newest reading per
+login is kept in ~/.local/state/a0/login-usage.json, so a login nobody is on counts as empty once its reset time passes. A seat
+moves when its login is at OUT % or more on either window and the other login is under ROOM % on both. It moves at its next
+idle, or at once when the login is fully used (the turn has stopped anyway). The move is owner-switch-login: same
+conversation, same pane, then one line telling the chat to carry on. Only the two logins below; never claude-fahmy.
+"""
+import datetime, glob, json, os, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+HOSTS = os.environ.get("LF_HOSTS", f"{HOME}/.local/state/agent-base/hosts")
+STATE = os.environ.get("LF_STATE", f"{HOME}/.local/state/a0")
+SWITCH = os.environ.get("LF_SWITCH", f"{HERE}/owner-switch-login")
+LOGINS = {"lordsisodia": f"{HOME}/.config/claude-siso-3", "fuzeheritage": f"{HOME}/.claude-siso"}
+SEATS = ["HALO", "UI-HUB", "DONGA-HETHONG", "HARNESS"]
+OUT, ROOM = 97, 90
+dry = "--dry" in sys.argv
+now = time.time()
+os.makedirs(STATE, exist_ok=True)
+USAGE, MEMO, LOG = f"{STATE}/login-usage.json", f"{STATE}/login-failover.json", f"{STATE}/login-failover.log"
+
+def load(p):
+    try: return json.load(open(p))
+    except Exception: return {}
+
+def login_of(d):
+    real = os.path.realpath(d.get("configDir") or "")
+    return next((k for k, v in LOGINS.items() if os.path.realpath(v) == real), None)
+
+def alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+
+def epoch(s):
+    try: return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception: return None
+
+recs = [d for d in (load(f) for f in glob.glob(f"{HOSTS}/w*_p*.json")) if d.get("pid") and alive(d["pid"])]
+
+usage = load(USAGE)
+for d in recs:
+    lim, who = d.get("rateLimits") or {}, login_of(d)
+    if who and lim.get("seven_day") and lim.get("at", 0) > usage.get(who, {}).get("at", 0):
+        usage[who] = lim
+if not dry:
+    json.dump(usage, open(USAGE, "w"), indent=1)
+
+def used(who):
+    """Highest used % across both windows; a window whose reset time has passed counts as 0. None = never read."""
+    lim = usage.get(who)
+    if not lim: return None
+    pcts = []
+    for w in ("five_hour", "seven_day"):
+        win = lim.get(w) or {}
+        reset = epoch(win.get("resets_at"))
+        pcts.append(0 if reset and reset < now else float(win.get("used_percentage") or 0))
+    return max(pcts)
+
+memo = load(MEMO)
+def say(seat, line):
+    """Log a seat's situation only when it changes, so a long wait is one line, not one every 2 minutes."""
+    if dry: print(f"{seat}: {line}"); return
+    if memo.get(seat, {}).get("line") == line: return
+    memo.setdefault(seat, {})["line"] = line
+    with open(LOG, "a") as f: f.write(f"{time.strftime('%F %T')} {seat}: {line}\n")
+
+for seat in SEATS:
+    mine = [d for d in recs if d.get("name") == seat]
+    if not mine:
+        say(seat, "no live host"); continue
+    d = max(mine, key=lambda r: int(r.get("updatedAt") or 0))
+    cur = login_of(d)
+    if not cur:
+        say(seat, f"on {d.get('configDir')}, not a failover login"); continue
+    pct = used(cur)
+    if pct is None or pct < OUT:
+        say(seat, f"on {cur}, fine"); continue
+    room = sorted((used(w), w) for w in LOGINS if w != cur and used(w) is not None and used(w) < ROOM)
+    if not room:
+        say(seat, f"{cur} at {pct:.0f}% and no other login has room; staying"); continue
+    to = room[0][1]
+    if pct < 100 and d.get("state") != "idle":
+        say(seat, f"{cur} at {pct:.0f}%; moves to {to} at its next idle"); continue
+    if now - memo.get(seat, {}).get("moved", 0) < 600:
+        say(seat, f"moved under 10 min ago; not moving again yet"); continue
+    then = (f"Agent Zero's login-failover moved you to the {to} Claude login because {cur} ran out of usage "
+            f"({pct:.0f}%). Same conversation. Carry on exactly where you left off.")
+    if dry:
+        print(f"{seat}: would move {cur} ({pct:.0f}%) -> {to} ({room[0][0]:.0f}%)"); continue
+    r = subprocess.run([SWITCH, d["pane"], LOGINS[to], "--now", "--then", then], capture_output=True, text=True)
+    memo.setdefault(seat, {})["moved"] = now
+    out = (r.stdout.strip() or r.stderr.strip() or f"exit {r.returncode}").splitlines()[-1]
+    say(seat, f"moved {cur} ({pct:.0f}%) -> {to} ({room[0][0]:.0f}%): {out}")
+
+if not dry:
+    json.dump(memo, open(MEMO, "w"), indent=1)
