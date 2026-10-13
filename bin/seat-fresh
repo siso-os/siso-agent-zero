@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""seat-fresh NAME [--note "what's next"] [--now]: restart a hosted seat as a NEW conversation that boots from its own handover.
+
+Shaan, 13 Oct ~01:50: "agents checkpoint and write up their stuff in their history and write handover doc and run their own
+internal command which does slash new with their own startup prompts depending which agent it was and what they were working on".
+Why: every Opus call re-reads the whole conversation (~190k on 12 Oct; calls over 150k were 62% of cost). A finished task
+carried forward is paid for again on every later call. A fresh start costs ~20-40k.
+
+A seat calls this on itself as its last action, after writing <repo>/.agents/HANDOFF.md:
+    nohup seat-fresh NAME --note "next: ..." >/dev/null 2>&1 &
+It waits until the seat's turn ends (idle), stops the host, and starts siso-host again in the same pane with the same name,
+model, login and repo, no --resume, and a startup prompt: who it is, read the HANDOFF top entry (and its brief if one is named
+in ~/.local/state/a0/briefs.json), then carry on. Same name = same place in the Agent Base nav. The old conversation stays on
+disk; `siso-host --resume <session>` brings it back. Log: ~/.local/state/a0/seat-fresh.log.
+"""
+import glob, json, os, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+HOSTS = f"{HOME}/.local/state/agent-base/hosts"
+STATE = f"{HOME}/.local/state/a0"
+HOST = f"{HOME}/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
+args = sys.argv[1:]
+if not args or args[0].startswith("-"): sys.exit(__doc__)
+who, now = args[0], "--now" in args
+note = args[args.index("--note") + 1] if "--note" in args else ""
+
+def log(line):
+    os.makedirs(STATE, exist_ok=True)
+    with open(f"{STATE}/seat-fresh.log", "a") as f: f.write(f"{time.strftime('%F %T')} {who}: {line}\n")
+    print(f"{who}: {line}")
+
+def alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+
+def record():
+    recs = [d for d in (json.load(open(f)) for f in glob.glob(f"{HOSTS}/w*_p*.json"))
+            if who in (d.get("name"), d.get("pane")) and alive(d.get("pid") or 0)]
+    return max(recs, key=lambda d: int(d.get("updatedAt") or 0)) if recs else None
+
+rec = record()
+if not rec: log("no live host"); sys.exit(1)
+name, pane, cwd, old_session = rec["name"], rec["pane"], rec["cwd"], rec["session"]
+cfg = rec.get("configDir") or f"{HOME}/.claude-siso"
+model = rec.get("model") or "claude-opus-5-5[1m]"
+# The seat usually calls this mid-turn: wait for that turn to end (up to 30 min), never cut it short unless --now.
+if not now:
+    time.sleep(5)
+    for _ in range(360):
+        try:
+            if json.load(open(f"{HOSTS}/{pane.replace(':', '_')}.json")).get("state") == "idle": break
+        except Exception: break
+        time.sleep(5)
+handoff = f"{cwd}/.agents/HANDOFF.md"
+try: brief = json.load(open(f"{STATE}/briefs.json")).get(name, "")
+except Exception: brief = ""
+prompt = (f"You are {name}, a fresh start of the same seat (the last conversation, {old_session}, finished a task and handed "
+          f"over). Read the top entry of {handoff}" + (f" and your brief {brief}" if brief else "") +
+          ", then carry on the next step it names. Haiku agents do the reading and searching." +
+          (f" Your note to yourself: {note}" if note else ""))
+os.makedirs(f"{STATE}/fresh", exist_ok=True)
+pfile = f"{STATE}/fresh/{name}.txt"
+open(pfile, "w").write(prompt)
+try: pct = json.load(open(f"{STATE}/compact-at.json")).get(name) or 33
+except Exception: pct = 33
+os.kill(int(rec["pid"]), 15)
+for _ in range(30):
+    if not alive(rec["pid"]): break
+    time.sleep(1)
+cmd = (f"cd '{cwd}' && CLAUDE_CONFIG_DIR={cfg} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct} {HOST} --keep-herdr-env "
+       f"--permission-mode bypassPermissions --name '{name}' --model '{model}' --prompt \"$(cat '{pfile}')\"")
+time.sleep(2)
+subprocess.run(["herdr", "pane", "send-keys", pane, "ctrl+c"], capture_output=True)
+r = subprocess.run(["herdr", "pane", "run", pane, cmd], capture_output=True, text=True)
+if r.returncode: log(f"FAIL relaunch ({r.stderr.strip()[:200]}); resume the old one: siso-host --resume {old_session}"); sys.exit(1)
+for _ in range(60):
+    try:
+        d = json.load(open(f"{HOSTS}/{pane.replace(':', '_')}.json"))
+        if d.get("session") and d.get("session") != old_session and alive(d.get("pid") or 0):
+            log(f"fresh in {pane}: session {d['session']} (was {old_session}), {os.path.basename(cfg)}, compact {pct}%"); sys.exit(0)
+    except Exception: pass
+    time.sleep(2)
+log(f"FAIL no new host in {pane} after 120 s; old conversation {old_session} is intact")
+sys.exit(1)
