@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""seat-to-t3 NAME [--now]: hand a laptop seat from siso-host (its herdr pane) to SISO Code (T3, 127.0.0.1:5490), same
+Claude conversation. Shaan, 14 Oct: "the agents are running on T3 code so I can click on them to actually manage the
+sessions".
+
+It waits until the seat is idle (never cuts a turn), makes sure SISO Code has a project at the seat's folder named after
+the seat, stops the siso-host and records the seat in ~/.local/state/agent-base/t3-seats.json (Agent Base then lists it as
+row "t3", which SISO Code's tree keeps). The first click on the seat in
+SISO Code's tree imports its Claude session as a thread (named and pinned as the seat); from then on T3 runs it, on the
+login that holds the session (T3 instances claude-fuze / claude-lord, autocompact 330k).
+Back: `siso-host --resume <session>` in its pane (the session id is in ~/.local/state/a0/seat-to-t3.jsonl).
+Mini seats need SISO Code on the mini first. Log: ~/.local/state/a0/seat-to-t3.jsonl."""
+import glob, json, os, sqlite3, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+HOSTS = f"{HOME}/.local/state/agent-base/hosts"
+STATE = f"{HOME}/.local/state/a0"
+T3 = f"{HOME}/.local/share/siso-code/app/t3/dist/bin.mjs"
+T3_BASE = f"{HOME}/.local/state/siso-code"
+NODE = f"{HOME}/.local/bin/node"
+args = sys.argv[1:]
+if not args or args[0].startswith("-"): sys.exit(__doc__)
+who, now = args[0], "--now" in args
+
+def alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+
+def record():
+    recs = [d for d in (json.load(open(f)) for f in glob.glob(f"{HOSTS}/w*_p*.json"))
+            if who in (d.get("name"), d.get("pane")) and alive(d.get("pid") or 0)]
+    return max(recs, key=lambda d: int(d.get("updatedAt") or 0)) if recs else None
+
+def say(event, **kw):
+    os.makedirs(STATE, exist_ok=True)
+    line = {"at": time.strftime("%FT%T%z"), "seat": who, "event": event, **kw}
+    with open(f"{STATE}/seat-to-t3.jsonl", "a") as f: f.write(json.dumps(line) + "\n")
+    print(f"{who}: {event} {' '.join(f'{k}={v}' for k, v in kw.items())}")
+
+def t3(*a):
+    return subprocess.run([NODE, T3, *a, "--base-dir", T3_BASE], capture_output=True, text=True, timeout=120)
+
+def t3_projects():
+    """(id, title, root) of SISO Code's live projects, read-only from its database."""
+    db = sqlite3.connect(f"file:{T3_BASE}/userdata/statev2.sqlite?mode=ro", uri=True)
+    try:
+        return list(db.execute("select project_id, title, workspace_root from projection_projects where deleted_at is null"))
+    finally:
+        db.close()
+
+rec = record()
+if not rec: sys.exit(say("no live host on the laptop (mini seats need SISO Code on the mini)") or 1)
+name, pane, cwd, session = rec["name"], rec["pane"], rec["cwd"].rstrip("/"), rec["session"]
+if not now:
+    for _ in range(360):  # 30 minutes
+        try:
+            if json.load(open(f"{HOSTS}/{pane.replace(':', '_')}.json")).get("state") == "idle": break
+        except Exception: break
+        time.sleep(5)
+found = [p for p in t3_projects() if (p[2] or "").rstrip("/") == cwd]
+if not found:
+    r = t3("project", "add", cwd, "--title", name)
+    if r.returncode: sys.exit(say("could not add the project", err=r.stderr.strip()[-300:]) or 1)
+elif not any(p[1] == name for p in found):
+    r = t3("project", "rename", found[0][0], name)
+    if r.returncode: sys.exit(say("could not rename the project", err=r.stderr.strip()[-300:]) or 1)
+os.kill(int(rec["pid"]), 15)
+for _ in range(30):
+    if not alive(rec["pid"]): break
+    time.sleep(1)
+seats_file = f"{HOME}/.local/state/agent-base/t3-seats.json"
+try: seats = json.load(open(seats_file))
+except Exception: seats = {}
+seats[name] = {"session": session, "cwd": cwd, "pane": pane, "at": time.strftime("%FT%T%z")}
+tmp = seats_file + ".tmp"
+json.dump(seats, open(tmp, "w"), indent=1)
+os.replace(tmp, seats_file)  # Agent Base's /api/agents lists it as row "t3"; SISO Code's tree keeps it
+say("handed to SISO Code", session=session, cwd=cwd, pane=pane, stopped=not alive(rec["pid"]))
