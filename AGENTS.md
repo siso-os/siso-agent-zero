@@ -28,6 +28,10 @@ How Agent Zero decides is in `docs/adr/` (one decision per file, his words insid
   no X-of-Y or status-row scaffolding.
 - **0004: every ask goes to one place.** `bin/ask new` files his words as a task + spec; owners pull `bin/ask queue <NAME>`, batch
   by area, newer words win on overlap.
+  An ask is for work its sender cannot do. What a seat's own product needs in another repo (an Agent Base tab, a SISO Code
+  hook) it builds itself on a branch, PRs and merges on green `siso-ci` (our CI on the Mac mini; GitHub Actions is off, Shaan 15 Oct "I don't want to do payments"; or a local test run pasted in the PR) (ADR 0009); the owner integrates, nobody waits on it. Never brief a seat "write X an ask", "don't edit X yourself" or "stay in your files" (OPERATOR read that as "the Ask HALO orb is not mine to build"); say "what you need in X's files goes in its own small PR"
+  (Shaan, 15 Oct: "certain agents saying, oh we can't build anything, it has to only be agent-based, that's so retarded").
+  SISO Code's `siso/` folder says where the code goes, not who writes it.
 - **0005: no approvals.** Owners decide from first principles, ship, and bring him a URL with before/after shots. Only physical
   things wait for him (his identity, a person on camera, money beyond budget, speaking as him), booked as sittings.
 - **0008: one owner, the blocker first, use what we hold, no timers.** Agent Zero hands a product over once, then sends nothing.
