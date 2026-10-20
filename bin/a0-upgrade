@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""a0-upgrade: Agent Zero upgrades itself on the side, through Haiku, with no merge chores.
+
+Shaan, 17 Oct: "any cool idea he has on Opus he can just get a Haiku 5.5 to upgrade, upgrade, upgrade on the side ...
+sometimes I have to approve them, sometimes if he just does them if he thinks it's clear-cut improvement".
+
+Flow: A0 files an idea (`add`), hands the id to an `upgrader` Haiku sub-agent in the background, and moves on. The
+upgrader works in its own worktree off origin/main (never in a checkout with other agents' dirty files), runs one check,
+and `ship`s: a clear-cut (auto) upgrade is merged at once and pulled into the live checkout; an `ask` upgrade stays an
+open PR that A0 names to Shaan in one line, and `approve` merges it when he says so.
+
+  a0-upgrade add "IDEA" --why "EVIDENCE" [--repo firstmate|agent-zero] [--ask]   file an upgrade; prints its id
+  a0-upgrade start ID                       make its worktree (prints the path the upgrader edits)
+  a0-upgrade ship ID --check "CMD"          run CMD in the worktree, commit, PR; auto: merge + pull; ask: leave open
+  a0-upgrade approve ID                     merge an ask upgrade Shaan agreed to, pull it live
+  a0-upgrade drop ID --why TEXT             give up on one (worktree removed only if it has no commits)
+  a0-upgrade list [--all]                   open upgrades (all with --all)
+  a0-upgrade brief                          3-part status for after a compaction: seats not ok, open upgrades, last sends
+  a0-upgrade log [--out PATH]               regenerate docs/upgrades/LOG.md: every upgrade, its why, status and verdict
+  a0-upgrade verdict ID good|bad|pending --note TEXT [--out PATH]   store Shaan's verdict, then regenerate the log
+
+Auto = A0's own skills' wording, a new or fixed check in A0's own tools (its check passes), logs, Haiku agent prompts.
+Ask  = anything Shaan sees or does differently, a seat he is working with, model or spend routing, a safety rule, or
+       removing a rule. The upgrader may move auto -> ask, never ask -> auto.
+"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+WS = HOME / "SISO_Workspace"
+REPOS = {
+    "firstmate": WS / "SISO_Agents/agent-zero/siso-firstmate",
+    "agent-zero": WS / "_data/worktrees/siso/main",
+}
+STATE = Path(os.environ.get("A0_UPGRADES_FILE", HOME / ".local/state/a0/upgrades.jsonl"))
+BIN = Path(__file__).resolve().parent
+
+
+def rows():
+    if not STATE.exists():
+        return []
+    out = []
+    for line in STATE.read_text().splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return out
+
+
+def current():
+    """Latest record per id (the file is append-only: every change is a new line)."""
+    d = {}
+    for r in rows():
+        d[r["id"]] = {**d.get(r["id"], {}), **r}
+    return d
+
+
+def put(rec):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    rec["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with STATE.open("a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def get(uid):
+    r = current().get(uid)
+    if not r:
+        sys.exit(f"no upgrade {uid}")
+    return r
+
+
+def sh(args, cwd=None, check=True):
+    p = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    if check and p.returncode:
+        sys.exit(f"{' '.join(args[:3])} failed: {(p.stderr or p.stdout).strip()[-600:]}")
+    return p
+
+
+def flag(args, key, default=None):
+    if key in args:
+        i = args.index(key)
+        v = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+        return v
+    return default
+
+
+def wt_path(r):
+    return WS / "_data/worktrees" / ("siso" if r["repo"] == "agent-zero" else REPOS[r["repo"]].name) / f"upgrade-{r['id']}"
+
+
+def pull_live(repo, paths):
+    """Bring the merged change into the live checkout without touching anyone's dirty files.
+    First a plain merge pull (it refuses by itself if a dirty file would change). When others' dirty work blocks it,
+    each file this upgrade changed is taken from origin/main on its own, but only if that file is clean here.
+    An untracked copy byte-identical to origin/main counts as clean: it is replaced by the tracked copy."""
+    if repo == REPOS["agent-zero"]:
+        sh([str(repo / "bin/siso"), "sync"], cwd=repo)
+        sh([str(repo / "bin/siso"), "live"], cwd=repo)
+        return "synced monorepo and live"
+    p = sh(["git", "pull", "--no-rebase", "--no-edit", "-q", "origin", "main"], cwd=repo, check=False)
+    if p.returncode == 0:
+        return "pulled live"
+    sh(["git", "fetch", "-q", "origin", "main"], cwd=repo, check=False)
+    done, held = [], []
+    for f in paths:
+        if sh(["git", "status", "--porcelain", "--", f], cwd=repo, check=False).stdout.strip() and not ours(repo, f):
+            held.append(f)
+        else:
+            if (repo / f).exists() and not sh(["git", "ls-files", "--", f], cwd=repo, check=False).stdout.strip():
+                (repo / f).unlink()  # untracked, but a version already on origin: nobody's unsaved work
+            sh(["git", "restore", "--source=origin/main", "--staged", "--worktree", "--", f], cwd=repo, check=False)
+            done.append(f)
+    return f"live by file: {', '.join(done) or 'none'}" + (f"; not live (dirty here): {', '.join(held)}" if held else "")
+
+
+def ours(repo, f):
+    """A dirty file whose content is some version already committed on origin/main holds nobody's unsaved work
+    (it is an earlier upgrade taken live by file), so it may be moved to the newest version."""
+    if not (repo / f).is_file():
+        return False
+    blob = sh(["git", "hash-object", "--", f], cwd=repo, check=False).stdout.strip()
+    revs = sh(["git", "rev-list", "-20", "origin/main", "--", f], cwd=repo, check=False).stdout.split()
+    return any(sh(["git", "rev-parse", f"{c}:{f}"], cwd=repo, check=False).stdout.strip() == blob for c in revs)
+
+
+def gh_repo(cwd):
+    """owner/name of origin, so a fork's PR never lands on its upstream."""
+    url = sh(["git", "remote", "get-url", "origin"], cwd=cwd).stdout.strip()
+    return url.rstrip("/").removesuffix(".git").replace(":", "/").split("/")[-2:]
+
+
+def cmd_add(a):
+    why, repo, ask = flag(a, "--why", ""), flag(a, "--repo", "firstmate"), "--ask" in a
+    a = [x for x in a if x != "--ask"]
+    if len(a) != 1 or not why:
+        sys.exit('a0-upgrade add "IDEA" --why "EVIDENCE" [--repo firstmate|agent-zero] [--ask]')
+    if repo not in REPOS:
+        sys.exit(f"repo must be one of {', '.join(REPOS)} (Agent Zero upgrades only itself)")
+    n = len(current()) + 1
+    uid = f"u{n:03d}"
+    put({"id": uid, "idea": a[0], "why": why, "repo": repo, "class": "ask" if ask else "auto", "status": "queued"})
+    print(uid)
+    print(f'Next: Agent(subagent_type: "upgrader", run_in_background: true, prompt: "Upgrade {uid}.")')
+
+
+def cmd_start(a):
+    r = get(a[0])
+    repo, wt = REPOS[r["repo"]], wt_path(r)
+    if not wt.exists():
+        sh(["git", "fetch", "-q", "origin", "main"], cwd=repo)
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        sh(["git", "worktree", "add", "-q", "-b", f"a0-upgrade/{r['id']}", str(wt), "origin/main"], cwd=repo)
+        put({"id": r["id"], "status": "working", "worktree": str(wt)})
+    print(json.dumps({"id": r["id"], "worktree": str(wt / "agents/zero" if r["repo"] == "agent-zero" else wt), "idea": r["idea"], "why": r["why"], "class": r["class"]},
+                     ensure_ascii=False))
+
+
+def cmd_ship(a):
+    check = flag(a, "--check")
+    r = get(a[0])
+    wt = wt_path(r)
+    if not check or not wt.exists():
+        sys.exit("a0-upgrade ship ID --check CMD (after start)")
+    module = wt / "agents/zero" if r["repo"] == "agent-zero" else wt
+    c = subprocess.run(check, shell=True, cwd=module, text=True, capture_output=True)
+    if c.returncode:
+        put({"id": r["id"], "status": "check-failed", "check": check, "out": (c.stdout + c.stderr)[-400:]})
+        sys.exit(f"check failed; nothing shipped:\n{(c.stdout + c.stderr)[-800:]}")
+    sh(["git", "add", "-A", "--", "agents/zero"] if r["repo"] == "agent-zero" else ["git", "add", "-A"], cwd=wt)
+    staged = sh(["git", "diff", "--cached", "--quiet"], cwd=wt, check=False).returncode != 0
+    ahead = sh(["git", "rev-list", "--count", "origin/main..HEAD"], cwd=wt, check=False).stdout.strip() != "0"
+    if not staged and not ahead:
+        sys.exit("no change to ship")
+    if staged:
+        commit(r, wt, check)
+    sh(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=wt)
+    open_pr(r, wt, check)
+
+
+def commit(r, wt, check):
+    msg = f"a0-upgrade {r['id']}: {r['idea'][:72]}\n\nWhy: {r['why']}\nCheck: {check}\n\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"
+    sh(["git", "commit", "-q", "-m", msg], cwd=wt)
+
+
+def open_pr(r, wt, check):
+    body = f"{r['why']}\n\nCheck: `{check}` passed.\nClass: {r['class']}\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+    paths = sh(["git", "diff", "--name-only", "HEAD~1", "HEAD"], cwd=wt).stdout.split()
+    put({"id": r["id"], "paths": paths})
+    url = sh(["gh", "pr", "create", "--repo", "/".join(gh_repo(wt)), "--head", f"a0-upgrade/{r['id']}", "--title", f"a0-upgrade {r['id']}: {r['idea'][:60]}", "--body", body,
+              "--base", "main"], cwd=wt).stdout.strip().splitlines()[-1]
+    if r["class"] == "ask":
+        put({"id": r["id"], "status": "needs-shaan", "pr": url, "check": check})
+        print(f"{r['id']} waits for Shaan: {url}")
+        return
+    merge(r, url, wt)
+
+
+def merge(r, url, wt):
+    # Outside any checkout: inside one, gh tries to switch to main, which the live checkout holds.
+    st = sh(["gh", "pr", "view", url, "--json", "state", "-q", ".state"], cwd="/tmp").stdout.strip()
+    if st != "MERGED":
+        sh(["gh", "pr", "merge", url, "--squash", "--delete-branch"], cwd="/tmp")
+    live = pull_live(REPOS[r["repo"]], get(r["id"]).get("paths", []))
+    sh(["git", "worktree", "remove", str(wt)], cwd=REPOS[r["repo"]], check=False)
+    sh(["git", "branch", "-q", "-D", f"a0-upgrade/{r['id']}"], cwd=REPOS[r["repo"]], check=False)
+    sh(["git", "push", "-q", "origin", "--delete", f"a0-upgrade/{r['id']}"], cwd=REPOS[r["repo"]], check=False)
+    put({"id": r["id"], "status": "merged", "pr": url, "live": live})
+    print(f"{r['id']} merged ({url}); {live}")
+
+
+def cmd_approve(a):
+    r = get(a[0])
+    if not r.get("pr"):
+        sys.exit(f"{r['id']} has no PR yet")
+    merge(r, r["pr"], wt_path(r))
+
+
+def cmd_drop(a):
+    why = flag(a, "--why")
+    r = get(a[0])
+    if not why:
+        sys.exit("a0-upgrade drop ID --why TEXT")
+    wt, repo = wt_path(r), REPOS[r["repo"]]
+    if wt.exists():
+        ahead = sh(["git", "rev-list", "--count", "origin/main..HEAD"], cwd=wt, check=False).stdout.strip()
+        dirty = sh(["git", "status", "--porcelain"], cwd=wt, check=False).stdout.strip()
+        if ahead == "0" and not dirty:
+            sh(["git", "worktree", "remove", str(wt)], cwd=repo, check=False)
+            sh(["git", "branch", "-q", "-D", f"a0-upgrade/{r['id']}"], cwd=repo, check=False)
+    put({"id": r["id"], "status": "dropped", "dropped_why": why})
+    print(f"{r['id']} dropped")
+
+
+OPEN = ("queued", "working", "check-failed", "needs-shaan")
+
+
+def cmd_list(a):
+    for r in current().values():
+        if "--all" in a or r.get("status") in OPEN:
+            print(f"{r['id']} {r.get('status', ''):12} {r.get('class', ''):4} {r.get('repo', ''):10} "
+                  f"{r.get('idea', '')[:70]}  {r.get('pr', '')}")
+
+
+def cmd_brief(_):
+    seat = subprocess.run([str(BIN / "seat")], text=True, capture_output=True).stdout.splitlines()
+    bad = [l for l in seat if l and not l.startswith("ok ") and "seats," not in l]
+    print("Seats not ok: " + ("; ".join(" ".join(l.split()[:2]) for l in bad) if bad else "none"))
+    opn = [r for r in current().values() if r.get("status") in OPEN]
+    print(f"Upgrades open: {len(opn)}" + "".join(f"\n  {r['id']} {r['status']}: {r['idea'][:80]} {r.get('pr', '')}"
+                                                for r in opn[-6:]))
+    log = subprocess.run([str(BIN / "seat"), "log", "8"], text=True, capture_output=True).stdout.strip()
+    print("Last dispatches (seat log):\n" + (log or "  none"))
+
+
+LOG = HOME / ".local/state/a0/upgrades.md"
+
+
+def cell(s):
+    return " ".join(str(s).split()).replace("|", "\\|")
+
+
+def cmd_log(a):
+    """One row per upgrade, from the store. Verdicts are Shaan's (ADR 0010); none stored means pending Shaan."""
+    out = Path(flag(a, "--out", str(LOG)))
+    first = {}
+    for r in rows():
+        first.setdefault(r["id"], r.get("at", ""))
+    lines = ["# Agent Zero upgrade log", "",
+             "Generated by `a0-upgrade log` from the upgrade store. Do not edit by hand. Verdicts: "
+             "`a0-upgrade verdict ID good|bad --note TEXT` (ADR 0010).", "",
+             "| id | date | idea | why | status | verdict |", "|---|---|---|---|---|---|"]
+    for uid, r in sorted(current().items()):
+        status = cell(r.get("status", "")) + (f" {r['pr']}" if r.get("pr") else "")
+        v = r.get("verdict")
+        verdict = "pending Shaan" if v in (None, "pending") else f"{v}: {cell(r.get('verdict_note', ''))}"
+        lines.append(f"| {uid} | {first.get(uid, '')[:10]} | {cell(r.get('idea', ''))} | {cell(r.get('why', ''))} "
+                     f"| {status} | {verdict} |")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n")
+    print(f"{out}: {len(current())} upgrades")
+
+
+def cmd_verdict(a):
+    out, note = flag(a, "--out"), flag(a, "--note", "")
+    if len(a) != 2 or a[1] not in ("good", "bad", "pending") or not note:
+        sys.exit('a0-upgrade verdict ID good|bad|pending --note TEXT [--out PATH]')
+    r = get(a[0])
+    put({"id": r["id"], "verdict": a[1], "verdict_note": note})
+    print(f"{r['id']} verdict {a[1]}")
+    cmd_log(["--out", out] if out else [])
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a.pop(0) if a else "list"
+    fn = {"add": cmd_add, "start": cmd_start, "ship": cmd_ship, "approve": cmd_approve, "drop": cmd_drop,
+          "list": cmd_list, "brief": cmd_brief, "log": cmd_log, "verdict": cmd_verdict}.get(cmd)
+    if not fn:
+        sys.exit(__doc__)
+    fn(a)
+
+
+if __name__ == "__main__":
+    main()

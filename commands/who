@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# siso: who — which agents are live, what each is on, and its model
+# usage: siso who [--json] [--all]
+# when: before giving or splitting work, or when a seat looks stuck
+"""Read the fleet projections without reading event history or opening a writable DB."""
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import sys
+
+LIVE = ('queued', 'preparing', 'starting', 'running', 'waiting')
+
+
+def stamp(value):
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError, AttributeError):
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def load(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def slug(text):
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+
+
+def relative(value, now):
+    if not value:
+        return 'unknown'
+    seconds = max(0, int((now-stamp(value)).total_seconds()))
+    if seconds < 60:
+        return f'{seconds}s ago'
+    if seconds < 3600:
+        return f'{seconds//60}m ago'
+    return f'{seconds//3600}h ago'
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--json', action='store_true'); p.add_argument('--all', action='store_true')
+    args = p.parse_args()
+    home = Path.home()
+    seats = {k: v for k, v in load(Path(os.environ.get('A0_SEATS_FILE', home / '.local/state/agent-base/t3-seats.json'))).items() if isinstance(v, dict) and not k.startswith('_')}
+    path = Path(os.environ.get('A0_T3_DB', home / '.local/state/siso-code/userdata/statev2.sqlite'))
+    now = dt.datetime.now(dt.timezone.utc)
+    try:
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA busy_timeout=5000')
+        # Status is indexed; never deserialize completed run payloads or scan the event store.
+        live = {}
+        for row in db.execute("SELECT thread_id, status, requested_at, payload_json FROM orchestration_v2_projection_runs WHERE status IN ('queued','preparing','starting','running','waiting')"):
+            r = dict(row)
+            if r['thread_id'] not in live or r['requested_at'] > live[r['thread_id']]['requested_at']:
+                live[r['thread_id']] = r
+        tids = {v['thread'] for v in seats.values() if v.get('thread')} | live.keys()
+        threads = {}
+        def remember(rows):
+            for row in rows:
+                threads[row['thread_id']] = dict(row)
+        # Bound SQLite variables even for a large fleet.
+        ids = sorted(tids)
+        for offset in range(0, len(ids), 400):
+            chunk = ids[offset:offset+400]
+            remember(db.execute('SELECT thread_id,title,archived_at,updated_at,payload_json FROM orchestration_v2_projection_threads WHERE thread_id IN (' + ','.join('?' for _ in chunk) + ')', chunk))
+        if args.all:
+            cutoff = (now-dt.timedelta(hours=24)).isoformat().replace('+00:00', 'Z')
+            remember(db.execute('SELECT thread_id,title,archived_at,updated_at,payload_json FROM orchestration_v2_projection_threads WHERE archived_at IS NULL AND updated_at>=?', (cutoff,)))
+        db.close()
+    except sqlite3.Error as e:
+        print(f'who: {e}', file=sys.stderr)
+        return 1
+    rows = []
+    named = {v.get('thread') for v in seats.values()}
+    entries = [(name, v.get('thread')) for name, v in sorted(seats.items())]
+    entries += [(t['title'], tid) for tid, t in sorted(threads.items()) if tid not in named and not t['archived_at'] and (tid in live or args.all)]
+    for name, tid in entries:
+        t = threads.get(tid, {})
+        run = live.get(tid) if not t.get('archived_at') else None
+        status = run['status'] if run else None
+        state = 'working' if status in ('preparing', 'starting', 'running') else status if status else 'idle' if t and not t.get('archived_at') and now-stamp(t['updated_at']) < dt.timedelta(hours=2) else 'stopped'
+        payload = load_payload(t.get('payload_json'))
+        rp = load_payload(run.get('payload_json')) if run else {}
+        request = rp.get('request', {})
+        summary = rp.get('requestSummary') or (request.get('summary') if isinstance(request, dict) else '') or rp.get('summary', '')
+        what = t.get('title') or summary or ''
+        activity = max(filter(None, [t.get('updated_at'), (run or {}).get('requested_at')]), default=None)
+        rows.append(dict(seat=name, thread=tid, model=(payload.get('modelSelection') or {}).get('model', ''), state=state, what=' '.join(str(what).split())[:90], last_activity=activity, relative=relative(activity, now)))
+    root = Path(os.environ.get('SISO_ROOT', Path(__file__).resolve().parents[3]))
+    generated = load(root / '.siso/generated/seats.json')
+    actual = {slug(name) for name in seats}
+    declared = {slug(v.get('title', key)) for key, v in generated.items()}
+    warnings = []
+    if actual-declared:
+        warnings.append('only in t3-seats: ' + ', '.join(sorted(actual-declared)))
+    if declared-actual:
+        warnings.append('only in generated seats: ' + ', '.join(sorted(declared-actual)))
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        print(f'{"SEAT":22} {"MODEL":24} {"STATE":8} {"WHAT":90} LAST ACTIVITY')
+        for r in rows:
+            print(f'{r["seat"]:22} {r["model"]:24} {r["state"]:8} {r["what"]:90} {r["relative"]}')
+    if warnings:
+        print('seat-map warning: ' + '; '.join(warnings), file=sys.stderr)
+    return 0
+
+
+def load_payload(text):
+    try:
+        return json.loads(text or '{}')
+    except (TypeError, ValueError):
+        return {}
+
+
+if __name__ == '__main__':
+    sys.exit(main())

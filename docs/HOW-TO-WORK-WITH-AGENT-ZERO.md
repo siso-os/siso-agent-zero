@@ -5,8 +5,14 @@ to other agents ... Sometimes I need to upskill myself." Built from what the lab
 (`research/agent-zero-v2/human-operator.md`) and from what went wrong for us in September and October.
 
 ## The one rule
-**Talk to Agent Zero.** One voice in. It turns what you say into jobs, runs them on the right model, checks them, lands them, and
-shows you what needs your eye. Two thirds of our tokens on 2-3 Oct went on agents talking to agents; one front door fixes that.
+**Talk to Agent Zero for coordination.** Astra is the primary Agent Zero. It turns your words into outcomes, coordinates
+existing integrating owners and parallel workers, checks returns and shows what needs your eye. Your direct Operator/UI
+conversations remain in place. The 2-3 Oct token measurements are historical, not current capacity limits.
+
+Current direction, 6 Oct: usage is abundant for the next 48 hours; Tebow is expected to provide more through the month.
+Your intention to buy Claude and Codex is recorded as intent, not a verified purchase. Use the strongest available intelligence
+and broad parallel work within hardware/API limits. New branches and local/DEV work are authorized; no cloud. Main,
+production, live streams and real-account actions still need your exact authorization.
 
 ## When to talk to Agent Zero (almost always)
 - Anything new: an idea, a bug, a client ask, a feeling that something is off.
@@ -14,9 +20,9 @@ shows you what needs your eye. Two thirds of our tokens on 2-3 Oct went on agent
 - Feedback on something you were shown.
 - Changing priorities, or stopping something.
 
-## When to talk to another agent directly (rare)
-- Only when you are sitting with **the one coder** on a project for fast taste back-and-forth (tuning a screen together). Agent
-  Zero tells you which agent that is. When you are done, tell Agent Zero "finished with X" so it picks the thread back up.
+## When to talk to another agent directly
+- Continue your existing **Operator/UI design conversations** for taste and screen iteration. The existing owner keeps that
+  lane; Agent Zero reads its handoff and coordinates dependencies without making you relay messages.
 - Never relay between agents, and never ask one agent what another did. Ask Agent Zero; it reads their files.
 
 ## How to say what you want (30 seconds, by voice)
@@ -28,7 +34,8 @@ shows you what needs your eye. Two thirds of our tokens on 2-3 Oct went on agent
 ## What comes back to you
 - **A Look**: a link or screenshot, with your words beside it, only when taste decides. Answer with changes you can see: "more
   space under the header", "v2, not v3", "the old icon was better".
-- **The board** (Agent Base) shows everything else as X of Y. Nothing pings you.
+- **The board** (Agent Base) shows outcomes as X of Y, the agents doing the work, their ownership, return paths and next gates.
+  No hour/day planning estimates. Nothing pings you.
 - **"Needs you"** is only for things only you can do: money, a login, a password, your presence, a call no one else can make.
 
 ## When to interrupt
@@ -40,29 +47,30 @@ Restart agents, relay messages, test things yourself, watch progress, approve ev
 ## Handing over UI issues (the punch list)
 Shaan, 4 Oct: "i'll hand go through some small issues and then you can note them down and somehow we can get one builder to tick them off".
 - Say them to Agent Zero as you see them, screenshots welcome. Each becomes a task with your words (`UI: ...`).
-- Agent Zero sorts each one: **clear** goes straight to the Builder; **needs reasoning** (a layout, a top bar) gets options from Agent
-  Zero first, and you pick by voice.
-- **One Builder** (Codex Sol) works the list in batches, one commit per task, with before/after screenshots. It is a row in Agent
-  Base's left nav: click it to watch the ticket it is on. You never talk to it; Agent Zero lands its work and checks it live.
-- **Fast lane, about 5 minutes an item:** the Builder locates every item in one pass, reads only the lines it changes, takes all
-  screenshots in one browser, and leaves the full checks to the ship queue (which runs them at landing anyway). Minutes per item are
-  measured from `codex-run`'s log; anything slower, Agent Zero finds out why.
+- Agent Zero sorts each one: **clear** goes to the existing integrating owner and Builder lane; **needs design reasoning** goes
+  to the direct UI owner for options you can see.
+- **The integrating owner** can split independent work across strong workers with explicit file/branch ownership. Each return
+  includes its evidence, result path and next integration gate; no duplicate standing Builder or owner.
+- **The fast lane:** locate related items in one pass, read the changed area, reuse one browser for screenshots and run the
+  relevant checks at the DEV integration gate. Main/live promotion still requires exact authorization.
 - **Design before build** (Shaan, 4 Oct 05:04: "if you'd reasoned it better I feel like you would have been able to get something
-  better"). A surface he looks at is designed first: Agent Zero (Opus) reasons out what it is for, then draws it as a picture from the
-  existing components, and he reacts to the picture in minutes. Only an approved picture goes to the Builder, which builds to match it
+  better"). A surface he looks at is designed first: its direct UI owner reasons out what it is for, then draws it as a picture from
+  existing components for his feedback. Only an approved picture goes to the Builder, which builds to match it
   and proves the match with screenshots side by side. Bug fixes and data work skip the picture.
 - A component you love gets a **taste lock**: a screenshot test, so no builder changes it without you.
 
 ## How the agents are arranged (so you know who does what)
-- **One coder per codebase**: two writers in one repo cause conflicts and rework.
+- **One integrating owner per scope**: parallel writers use isolated branches/worktrees or disjoint files, respecting current locks.
+  Existing owners retain their scopes; do not interrupt active agents or create duplicate standing agents.
 - **Many researchers**: they read and write findings files in `research/`, never code, so many can run at once. You can watch
   them on the Research page; Agent Zero reads their findings and tells you what changed.
-- **Agent Zero (Opus)** decides, specs, checks and lands. Cheap models (Luna, DeepSeek) do most of the work; Sol and Opus take
-  the hard parts. Which model gets which job is in `routing.json`.
+- **Agent Zero (Astra)** coordinates, reasons, checks and integrates through the existing owners. Use strongest available
+  intelligence and broad parallel work for outcomes; model routes and dated historical evidence live in `routing.json`.
+  Reports name the outcome, agents, ownership, return paths and next gate, without hour/day planning estimates.
 
 ## Getting better at it (your five skills)
 1. **Say "done when".** It is the biggest single lever: a clear finish line is what a machine can check.
 2. **Give taste as changes you can see**, against a screenshot.
 3. **Batch your feedback**: one message with every change beats five.
 4. **Pick from variations.** Ask for three; picking is faster than describing.
-5. **Ask what it cost.** Once a week: tokens per change that went live. It should fall every week.
+5. **Ask what improved.** Judge verified outcomes, reliability, your intervention and compute used; usage serves real work.

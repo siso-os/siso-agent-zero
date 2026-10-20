@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""seat: the org chart (~/.local/state/agent-base/t3-seats.json) checked against the live SISO Code threads.
+
+Shaan, 17 Oct: Agent Zero was "messaging wrong agents" and "doesn't have the right skills to edit the agent org chart".
+Cause: names were resolved from memory or a stale file; thread ids were reused and retitled; seats pointed at archived
+threads. This tool resolves exactly (no fuzzy match), shows each thread's live title, and edits the chart in one place.
+
+  seat                      every seat: thread, live title, state (ok | archived | no-thread | missing | retitled?)
+  seat which NAME|THREAD    one seat or thread, exact; exit 1 if it is not a live, unambiguous target
+  seat set NAME THREAD [--cwd DIR] [--note TEXT]   add or repoint a seat (old thread kept as previous_thread)
+  seat retire NAME --why TEXT                      move a seat to t3-seats.retired.json beside it (nothing deleted)
+  seat log [N]              the last N dispatches (default 15) from ~/.local/state/a0/dispatch.jsonl
+"""
+import json, os, shlex, sqlite3, subprocess, sys, time, shutil
+from pathlib import Path
+
+HOME = Path.home()
+SEATS = Path(os.environ.get("A0_SEATS_FILE", HOME / ".local/state/agent-base/t3-seats.json"))
+DB = Path(os.environ.get("A0_T3_DB", HOME / ".local/state/siso-code/userdata/statev2.sqlite"))
+LOG = Path(os.environ.get("A0_DISPATCH_FILE", HOME / ".local/state/a0/dispatch.jsonl"))
+REMOTE_DB = "~/.local/state/siso-code/userdata/statev2.sqlite"  # the same DB on a seat's runsOn machine
+SSH_HOST = {"mini": "mini-fast"}  # runsOn -> ssh alias
+# Opus is for these seats only (firstmate AGENTS.md "Models"; routing.json). Every other seat is Sonnet 5.5.
+OPUS_SEATS = {"Agent Zero", "AGENT-BASE", "OPERATOR", "MODEL-APP", "HALO-BOX", "HALO-MONO", "ONBOARDING"}
+
+
+def load():
+    return json.loads(SEATS.read_text()) if SEATS.exists() else {}
+
+
+def save(d):
+    SEATS.parent.mkdir(parents=True, exist_ok=True)
+    if SEATS.exists():
+        bak = SEATS.with_name(SEATS.name + ".bak")
+        shutil.copy2(SEATS, bak)
+    tmp = SEATS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(SEATS)
+
+
+def as_thread(r):
+    p = json.loads(r[4] or "{}")
+    return {"title": r[0], "archived": r[1], "deleted": r[2], "updated": (r[3] or "")[:16],
+            "model": (p.get("modelSelection") or {}).get("model", ""), "worktree": p.get("worktreePath")}
+
+
+def thread_remote(tid, host):
+    """The same row, read on the seat's runsOn machine: one ssh call. ssh or sqlite failing is 'unreachable', not 'missing'."""
+    sql = ("select title, archived_at, deleted_at, updated_at, payload_json from orchestration_v2_projection_threads"
+           " where thread_id='" + tid.replace("'", "''") + "'")
+    cmd = f"sqlite3 -readonly -json {REMOTE_DB} {shlex.quote(sql)}"
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "RemoteCommand=none", "-o", "RequestTTY=no",
+           SSH_HOST.get(host, host), cmd]
+    try:
+        r = subprocess.run(ssh, capture_output=True, text=True, timeout=20)
+        rows = json.loads(r.stdout or "[]") if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        rows = None
+    if rows is None:
+        return {"unreachable": host}
+    if not rows:
+        return {"missing": True}
+    x = rows[0]
+    return as_thread((x["title"], x["archived_at"], x["deleted_at"], x["updated_at"], x["payload_json"]))
+
+
+def thread(tid, host=None):
+    if not tid:
+        return None
+    if host and host != "laptop":
+        return thread_remote(tid, host)
+    if not DB.exists():
+        return None
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=2)
+        r = db.execute(
+            "select title, archived_at, deleted_at, updated_at, payload_json from orchestration_v2_projection_threads"
+            " where thread_id=?", (tid,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not r:
+        return {"missing": True}
+    return as_thread(r)
+
+
+def norm(s):
+    return "".join(c for c in s.upper() if c.isalnum())
+
+
+def state(name, t):
+    if t is None:
+        return "no-thread"
+    if t.get("unreachable"):
+        return f"unreachable ({t['unreachable']})"
+    if t.get("missing"):
+        return "missing"
+    if t.get("deleted") or t.get("archived"):
+        return "archived"
+    if norm(name) not in norm(t["title"]):
+        return "retitled?"
+    return "ok"
+
+
+def seats(d):
+    return {k: v for k, v in d.items() if isinstance(v, dict) and not k.startswith("_")}
+
+
+def cmd_list(_):
+    d = seats(load())
+    bad = off = 0
+    for name, v in d.items():
+        t = thread(v.get("thread"), v.get("runsOn")) if v.get("thread") else None
+        st = state(name, t)
+        bad += st != "ok"
+        title = (t or {}).get("title", "")
+        print(f"{st:10} {name:18} {v.get('thread', '')[:40]:40} {title[:44]:44} {(t or {}).get('model', '')}")
+        if "opus" in (t or {}).get("model", "") and name not in OPUS_SEATS:
+            off += 1  # a flag only: the state and the exit code stay as they are, so no dispatch is refused
+            print(f"           ! {t['model']}: not on the Opus chart (routing.json; the seat default is Sonnet 5.5)")
+    print(f"{len(d)} seats, {bad} not ok, {off} off the Opus chart. Fix one: seat set NAME THREAD | seat retire NAME --why ...")
+
+
+def cmd_which(args):
+    if not args:
+        sys.exit("seat which NAME|THREAD")
+    q = args[0]
+    d = seats(load())
+    if q.startswith("mcp:") or len(q) > 30:
+        names = [k for k, v in d.items() if v.get("thread") == q]
+        name = names[0] if names else None
+        t = thread(q, d[name].get("runsOn") if name else None)
+    else:
+        hits = [k for k in d if k.upper() == q.upper()]
+        if len(hits) != 1:
+            print(f"no seat named exactly {q!r}. Seats: {', '.join(d)}")
+            sys.exit(1)
+        name = hits[0]
+        q = d[name].get("thread", "")
+        t = thread(q, d[name].get("runsOn")) if q else None
+    st = state(name, t) if name else ("ok" if t and not t.get("missing") and not t.get("archived") else "missing")
+    if not name and st == "ok":
+        st = "not-in-org-chart"
+    print(json.dumps({"seat": name, "thread": q, "state": st, **(t or {})}, ensure_ascii=False))
+    sys.exit(0 if st in ("ok", "not-in-org-chart") else 1)
+
+
+def flag(args, key):
+    if key in args:
+        i = args.index(key)
+        v = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+        return v
+    return None
+
+
+def cmd_set(args):
+    cwd, note = flag(args, "--cwd"), flag(args, "--note")
+    if len(args) != 2:
+        sys.exit("seat set NAME THREAD [--cwd DIR] [--note TEXT]")
+    name, tid = args
+    d = load()
+    old = d.get(name, {}) if isinstance(d.get(name), dict) else {}
+    t = thread(tid, old.get("runsOn"))
+    if not t or t.get("missing") or t.get("unreachable"):
+        sys.exit(f"thread {tid} is not in SISO Code; refusing to point {name} at it")
+    new = dict(old)
+    if old.get("thread") and old["thread"] != tid:
+        new["previous_thread"] = old["thread"]
+    new.update({"thread": tid, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    if cwd:
+        new["cwd"] = cwd
+    if note:
+        new["note"] = note
+    new.setdefault("cwd", "")
+    d[name] = new
+    save(d)
+    print(f"{name} -> {tid} ({t.get('title')}); backup {SEATS.name}.bak")
+
+
+def cmd_retire(args):
+    why = flag(args, "--why")
+    if len(args) != 1 or not why:
+        sys.exit("seat retire NAME --why TEXT")
+    d = load()
+    name = args[0]
+    if name not in d:
+        sys.exit(f"no seat {name}")
+    # A separate file: SISO Code reads every top-level key of t3-seats.json as a seat (seatThreads.ts, seatRoute.ts).
+    rf = SEATS.with_name("t3-seats.retired.json")
+    ret = json.loads(rf.read_text()) if rf.exists() else {}
+    ret[f"{name}@{time.strftime('%Y-%m-%d')}"] = {**d.pop(name), "retired_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                                    "why": why}
+    rf.write_text(json.dumps(ret, indent=2, ensure_ascii=False) + "\n")
+    save(d)
+    print(f"{name} retired (kept in {rf.name})")
+
+
+def cmd_log(args):
+    n = int(args[0]) if args else 15
+    if not LOG.exists():
+        sys.exit("no dispatch log yet")
+    for line in LOG.read_text().splitlines()[-n:]:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        # Short rows (hand-appended, mini-t3) carry tool/seat/msg instead of kind/name/brief.
+        brief = " ".join((r.get("brief") or r.get("msg") or "").split())
+        kind = r.get("kind") or r.get("tool") or ""
+        name = r.get("name") or r.get("seat") or ""
+        print(f"{r.get('at', '')[:16]} {kind:12} {r.get('model', '') or '-':8} {name[:30]:30} {brief[:90]}")
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a.pop(0) if a else "list"
+    {"list": cmd_list, "which": cmd_which, "set": cmd_set, "retire": cmd_retire, "log": cmd_log}.get(
+        cmd, lambda _: sys.exit(__doc__))(a)
+
+
+if __name__ == "__main__":
+    main()

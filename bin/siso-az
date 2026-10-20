@@ -28,8 +28,9 @@ Records live in .agents/a0/ of this repo (private, tracked); the agents' report 
 import argparse, datetime as dt, fcntl, json, os, re, shutil, socket, subprocess, sys, uuid
 
 HOME_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # this repo: data in .agents/a0/, tasks in tasks/
-BOOT_DIR = os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")  # where Agent Zero runs (4 Oct)
-A0 = os.path.join(HOME_DIR, ".agents", "a0")
+BOOT_DIR = os.path.expanduser("~/SISO_Workspace/_data/worktrees/siso/main/agents/zero")  # where Agent Zero runs (4 Oct)
+DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME_DIR, "../../.siso")) else HOME_DIR
+A0 = os.path.join(DATA_HOME, ".agents", "a0")
 SESSIONS = os.path.join(A0, "sessions.jsonl")
 LOG = os.path.join(A0, "log.jsonl")
 TASKS = os.path.join(A0, "tasks.json")

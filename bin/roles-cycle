@@ -15,6 +15,7 @@
 # count or memory is under 30% free (the 8 Oct load storm), only efficiency and health get turns.
 Z="$(cd "$(dirname "$0")/.." && pwd)"; H="$HOME/.local/state/agent-base/hosts"; LOG="$HOME/.local/state/a0/roles-cycle.log"
 M="$HOME/.local/state/a0/role-modes.json"
+R="${A0_ROLE_STATE:-$HOME/.local/state/a0/role-ledgers}"; mkdir -p "$R"
 [ -f "$M" ] || echo '{"efficiency": "goal", "health": "goal", "ESTATE": "goal"}' > "$M"
 say() { echo "$(date '+%d %b %H:%M') $*" >> "$LOG"; }
 mode() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],'idle'))" "$M" "$1"; }
@@ -35,7 +36,7 @@ for n in efficiency health; do
   pgrep -f "bin/role run $n" >/dev/null && continue
   [ "$(state "$H/name-$N.json")" = idle ] || continue
   # Two blocked returns in a row with the number unchanged: stop spending, drop to idle, say why.
-  stuck=$(python3 - "$Z/roles/$n.jsonl" <<'PY'
+  stuck=$(python3 - "$R/$n.jsonl" <<'PY'
 import json, re, sys
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()][-2:]
 def flat(r):

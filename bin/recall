@@ -16,6 +16,7 @@ then superseded history last.
 import glob, json, os, re, sys
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
 LAYERS = [
     ("his words (chat)", [".agents/a0/transcript/raw/*.jsonl"]),
     ("his words (memos)", ["words/source/*.md", "words/*.md"]),
@@ -53,10 +54,11 @@ def variants(term, table):
 def files_for(pat):
     if pat.startswith("@"):  # a list of paths written by `a0-transcript build --all` (globbing the whole estate takes ~30 s)
         try:
-            return [l.strip() for l in open(os.path.join(HOME, pat[1:])) if l.strip()]
+            return [l.strip() for l in open(os.path.join(DATA_HOME, pat[1:])) if l.strip()]
         except OSError:
             return []
-    found = glob.glob(os.path.expanduser(pat) if pat.startswith("~") else os.path.join(HOME, pat), recursive=True)
+    state = pat.startswith((".agents/", "tasks/", "asks/", "words/", "jobs/", "research/")) or pat == "projects.json"
+    found = glob.glob(os.path.expanduser(pat) if pat.startswith("~") else os.path.join(DATA_HOME if state else HOME, pat), recursive=True)
     dated = all(re.match(r"\d{4}-\d\d-\d\d", os.path.basename(f)) for f in found)
     return sorted(found, reverse=True) if dated else sorted(found, key=os.path.getmtime, reverse=True)
 

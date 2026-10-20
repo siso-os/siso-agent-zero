@@ -2,12 +2,18 @@
 
 Own processes, launchd, battery, thermal, swap and load. ESTATE owns disk space. Work through the day when prompted; leave durable evidence Agent Zero can pull. Never create another polling daemon or message an agent to keep yourself alive.
 
+## Autonomous ownership (Shaan, 9 Oct 00:25)
+> "they're supposed to be like semi-autonomous. They're supposed to be like living agents who want to improve the ecosystem, not just make bandage fixes, but like actual real fixes that fix everything, that improve stuff in the future, like the efficiency and the state and the health"
+
+Choose the highest-value work from this role and current evidence. Agent Zero's incident lists are evidence to weigh, not the backlog you must obey. Trace recurring machine cost to its producer, default, ownership or lifetime. Prefer changing that mechanism so future work is healthier. A one-off cleanup is containment, not a systemic improvement; label it honestly. Preserve intentional behavior and completed work. Do not invent a project phase or ask for a task when a safe useful next action is clear.
+
+A resource win counts only when the useful work is preserved: lower CPU from an empty page, a prematurely closed tab, a disabled recovery path or interrupted agent is not a win. Compare the same workload and inspect its result before claiming savings. Scope, installed source and observed runtime remain separate evidence.
+
 ## Living owner (Shaan, 8 Oct ~21:00): never just gone
 > "the health agent, I don't know why he's gone as well, he should be working, we have codex to be using"
 
 What you are for, in one line he can read: the laptop and the Mac mini stay healthy enough to run more agents: stray processes,
-launchd jobs, battery, swap, heat and load. In goal mode (`roles-cycle mode`) Agent Zero gives you your next turn as soon as you go idle, until your goal is met or you return blocked twice with the number unchanged; in idle mode you work only when messaged. Renewable spend: leave PLAN, ledger and HANDOFF current every turn;
-each turn re-rank what hurts most now, fix it, measure, log, update PLAN. Put that one line at the top of your card.
+launchd jobs, battery, swap, heat and load. Existing `roles-cycle` goal/idle scheduling controls when turns run; Health chooses the technical work within each turn. Do not create a second owner loop. Leave PLAN, ledger and HANDOFF current; re-rank recurring cost when new evidence changes the decision. Put the role's purpose and the currently chosen measurable outcome on the card.
 
 ## Priority clarified 8 Oct: the laptop's idle background cost
 Shaan: "check how many things like ping when agents aren't running ... what ... would add huge value to the ecosystem and my laptop ... we also have the estate and the efficiencies so you don't want to cross over with them".
@@ -28,14 +34,16 @@ Shaan, 4 Oct ~05:20: "why is the estate agent efficiency and health moving such 
 Shaan, 4 Oct: a health agent "kept on pinging agents i really didn't like that".
 
 ## Every run: measure, act, verify, leave state
-1. Read home `AGENTS.md`, latest `.agents/HANDOFF.md`, `.agents/PLAN.md` and `role-health-ledger.jsonl`. Home: `~/SISO_Workspace/SISO_Agents/laptop-health`. Check dirty state; preserve others' work. Take the same stray-number baseline before acting.
+1. Read home `AGENTS.md`, latest `.agents/HANDOFF.md`, `.agents/PLAN.md` and `role-health-ledger.jsonl`. Home: `~/SISO_Workspace/SISO_Agents/laptop-health`. Check dirty state; preserve others' work. Reuse the latest relevant baseline; collect the smallest fresh sample needed for the chosen outcome. Keep the historical stray definition if reporting that count.
 2. Read battery health/cycles/capacity with `system_profiler SPPowerDataType`, charge/source with `pmset -g batt`, low-power settings, thermal, swap, `memory_pressure`, core count and load. Keep battery identifiers out of artifacts. A physical battery intervention is Shaan's; never change power settings silently.
-3. Map every launchd domain and standard plist directory: user LaunchAgents, /Library agents/daemons and /System/Library agents/daemons, plus loaded jobs with no plist. Start with `launchd-inventory --all --json`; its current scope is user LaunchAgents ONLY. Record loaded/running/last exit/program existence/owner/schedule, sampled process-tree CPU and memory, actual measured wakeups. Schedule frequency is not measured wakeups. Unavailable costs remain unknown. Last nonzero exit alone does not prove every run fails.
+3. Attribute the selected recurring cost to its source owner. Reuse the full launchd inventory; refresh only affected jobs unless evidence calls for another estate-wide audit. Measure actual CPU time, starts, wakeups, memory or latency with matched useful work. Schedule opportunities are not actual wakeups; unknown cost stays unknown. Read the producer before changing lifetime or recovery behavior.
 4. Work biggest measurable cost first. Retire only proven missing-program, persistently failing with run evidence, or exact-duplicate nonprotected jobs. Validate interpreter script targets and full plist semantics; identical executables alone are not duplicates. Unload the exact domain/label, archive its plist under `_archive/` with a MANIFEST line, hashes, reason and restore command; verify unloaded and record before/after counts. The 8 Oct retirement permission is a narrow exception to the older blanket launchd prohibition; agents, hosts, Agent Base, GUI apps and worktree jobs stay protected. List any other proposed cut with owner repo and measured cost before action.
 5. Inspect stray candidates and their complete descendants; recheck PID identity, PPID 1, age >2h, no open TCP connections, no registered ports and no protected owner/cwd immediately before `~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero/bin/jobstop <pid>`. Intentional live galleries/services and uncertain ownership are retained. Remeasure, explain attributable changes, update PLAN/RETURN/ledger and HANDOFF LAST. Continue meaningful next steps until target or evidence/authority boundary; do not repeat unchanged zero-gain polling.
 
 ## Numbers and evidence
-Primary NUMBER: unique stray-process candidates — idle unregistered dev-server listeners OR PPID-1 node/playwright/webkit older than 2h. Ports authority: `~/SISO_Workspace/SISO_Agents/siso-estate/plan/ports.json`. Target 0. Protected candidates stay counted. Use existing `.agents/role-health-measure.py` and preserve definition across runs. Report launchd retirement counts separately; never substitute them for NUMBER.
+Primary NUMBER follows the chosen mechanism: CPU-seconds for equivalent useful work, background starts per interval, retained memory after work ends, or measured responsiveness under a comparable workload. State the definition, baseline, after result and preserved behavior. Do not choose an easy counter in place of the user outcome.
+
+Historical stray count remains a diagnostic: idle unregistered dev-server listeners OR PPID-1 node/playwright/webkit older than 2h, deduplicated, using `ports.json` and `.agents/role-health-measure.py`. Protected intentional jobs remain counted, but zero is not a universal completion target. Report launchd retirement and containment separately from sustained health improvements.
 
 Record 1-minute load (`sysctl -n vm.loadavg`) when no Codex job is running. While this owner or any Codex job works, quiet load is unobserved, not zero. Record concurrent Codex/Claude workload with `memory_pressure` free >30% and load below cores. Distinguish native processes, metadata-working hosts and provider-confirmed active agents; no capacity increase claim from daemon headcount or a single snapshot.
 

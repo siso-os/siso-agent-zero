@@ -16,7 +16,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("A0_DATA_HOME", Path.home() / "SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if (Path(__file__).resolve().parents[3] / ".siso").is_dir() else Path(__file__).resolve().parent.parent
 TASKS = ROOT / "tasks"
 INDEX = TASKS / "INDEX.json"
 PLAN = ROOT / ".agents/A0-plan.json"  # generated view, read only by the Agent Base hub

@@ -1,0 +1,21 @@
+#!/bin/sh
+# a0-review: Agent Zero's daily self-review, run by one headless Haiku 5.5 (launchd com.siso.a0-review, 07:30).
+# Shaan, 17 Oct: "Haikus are basically free ... upgrade, upgrade, upgrade on the side". It reads the last day of
+# dispatches, mistakes and seat state, files up to three upgrades with a0-upgrade and ships the clear-cut ones.
+# Opus spends nothing on this. Output: ~/.local/state/a0/a0-review.log; its upgrades show in `a0-upgrade list --all`.
+set -u
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-siso}"
+cd "$HOME/SISO_Workspace/_data" || exit 1
+echo "== $(date '+%F %T') a0-review"
+exec timeout 1500 claude -p --model claude-haiku-5-5 --dangerously-skip-permissions "You are Agent Zero's daily self-review.
+Agent Zero is the one orchestrator agent Shaan talks to; its skills are in ~/SISO_Workspace/SISO_Agents/agent-zero/siso-firstmate/.agents/skills/ and its tools in ~/SISO_Workspace/_data/worktrees/siso/live/agents/zero/bin/.
+Read, in this order and only these:
+1. seat (the org chart with live titles) and seat log 60 (the last dispatches).
+2. tail -40 ~/.claude/lessons/LEDGER.md (mistakes).
+3. a0-upgrade list --all (upgrades already filed; never file a duplicate).
+4. The skill an issue points at, one window at a time.
+Find at most THREE concrete, repeated problems: a seat not ok, sends to the same seat over and over within minutes, Agent rows on model inherit or opus, a mistake in the LEDGER that has happened twice, a skill line that contradicts another.
+For each one, file it with: a0-upgrade add \"<the change, as an edit>\" --why \"<count or path>\" --repo firstmate|agent-zero, adding --ask when it changes what Shaan sees, model or spend routing, a safety rule, or a seat he works with.
+Then ship each auto one you filed in this run (never an id you did not file) by following ~/.claude/agents/upgrader.md for its id. Leave ask ones filed; Agent Zero tells Shaan.
+If nothing is worth fixing, file nothing. Print one line per upgrade: id, status, PR. Nothing else."

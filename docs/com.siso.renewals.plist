@@ -4,7 +4,7 @@
 <dict>
 	<key>Label</key><string>com.siso.renewals</string>
 	<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/shaansisodia/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
-	<key>ProgramArguments</key><array><string>/Users/shaansisodia/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero/bin/renewals</string><string>warn</string></array>
+	<key>ProgramArguments</key><array><string>/Users/shaansisodia/SISO_Workspace/_data/worktrees/siso/live/agents/zero/bin/renewals</string><string>warn</string></array>
 	<key>StartCalendarInterval</key><array><dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict><dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict></array>
 	<key>RunAtLoad</key><true/>
 	<key>ProcessType</key><string>Background</string>
