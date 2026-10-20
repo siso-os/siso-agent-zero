@@ -1,6 +1,6 @@
 """Completion regressions; fixtures and host replies never reach a real agent.
 
-Run with A0_COMPLETION_FIXTURE_ROOT pointing at a disposable, trap-cleaned directory.
+Uses an owned temporary directory unless A0_COMPLETION_FIXTURE_ROOT is supplied.
 """
 import datetime
 import json
@@ -8,12 +8,14 @@ import os
 from pathlib import Path
 import runpy
 import subprocess
+import tempfile
 import time
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = Path(os.environ["A0_COMPLETION_FIXTURE_ROOT"]).resolve()
+_fixture_home = None if os.environ.get('A0_COMPLETION_FIXTURE_ROOT') else tempfile.TemporaryDirectory(prefix='a0-completion-')
+FIXTURES = Path(os.environ.get('A0_COMPLETION_FIXTURE_ROOT') or _fixture_home.name).resolve()
 
 
 class CompletionTests(unittest.TestCase):
@@ -101,7 +103,9 @@ printf '%s\n' "$count" > "$fixture/count"
 cat "$fixture/reply-$count"
 ''')
         host.chmod(0o755)
-        result = subprocess.run([str(controller), "own", "health", "4"], capture_output=True, text=True, timeout=20)
+        (self.fixture / '.local/state/a0').mkdir(parents=True)
+        env = dict(os.environ, HOME=str(self.fixture), A0_ROLE_STATE=str(roles))
+        result = subprocess.run([str(controller), "own", "health", "4"], capture_output=True, text=True, timeout=20, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), f"health: {expected} runs")
         self.assertEqual(int((self.fixture / "count").read_text()), expected)
