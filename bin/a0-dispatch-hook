@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""a0-dispatch-hook: Claude Code PreToolUse/PostToolUse hook for an orchestrator session (Agent Zero).
+
+Shaan, 17 Oct: "messaging wrong agents ... spawning Sonnet 5.5s ... not writing his own logs".
+  Pre  t3_thread_send     mode queue or unset becomes auto, so a send steers a running turn (Shaan, 19 Oct); the target's live title and org-chart seat go into context; archived or unknown threads are refused;
+                          a second send to the same seat within 15 minutes is refused unless it starts CORRECTION: or NEW TOPIC:.
+  Pre  t3_thread_launch   an Opus seat that is not Agent Zero / AGENT-BASE is refused unless the message says OPUS-REASON:;
+                          a title that duplicates a live thread is flagged.
+  Pre  launch / delegate  a Claude model without modelSelection.options.autoCompactWindow, or above 330000, is
+                          refused (Shaan 18 Oct: "the auto compacts cook"; HALO seats 250000).
+  Pre  Agent             a general-purpose/claude sub-agent with no model (inherits Opus) or model opus is refused:
+                          reads and checks go to model haiku (routing.json).
+  Pre  send / launch     a HALO brief that names the Mac mini gets a warning (Shaan 18 Oct: HALO runs VPS + Cloudflare only).
+  Post all of the above   one line appended to ~/.local/state/a0/dispatch.jsonl (the log `seat log` and `look` read).
+Never blocks on its own failure: any error exits 0 silently.
+"""
+import json, os, re, sqlite3, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+DB = Path(os.environ.get("A0_T3_DB", HOME / ".local/state/siso-code/userdata/statev2.sqlite"))
+SEATS = Path(os.environ.get("A0_SEATS_FILE", HOME / ".local/state/agent-base/t3-seats.json"))
+LOG = Path(os.environ.get("A0_DISPATCH_FILE", HOME / ".local/state/a0/dispatch.jsonl"))
+OPUS_SEATS = ("AGENT ZERO", "AGENT-BASE", "HALO", "OPERATOR", "MODEL-APP")
+
+
+def q(sql, args=()):
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=2)  # read-only; 2 s busy timeout so a checkpoint never stalls PreToolUse
+        return db.execute(sql, args).fetchall()
+    except sqlite3.Error:
+        return None
+
+
+def seat_of(tid):
+    try:
+        for k, v in json.loads(SEATS.read_text()).items():
+            if isinstance(v, dict) and v.get("thread") == tid and not k.startswith("_"):
+                return k
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def remote_seat(tid):
+    """The seat whose thread runs on another machine (runsOn, e.g. mini): its thread is not in this laptop's DB."""
+    try:
+        for k, v in json.loads(SEATS.read_text()).items():
+            if isinstance(v, dict) and v.get("thread") == tid and v.get("runsOn") not in (None, "", "laptop") \
+                    and not k.startswith("_"):
+                return k
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def mini_warning(name, msg):
+    """A HALO brief that names the Mac mini gets a warning (Shaan 18 Oct: HALO sends nothing to the mini)."""
+    if re.match(r"HALO([ -]|$)", str(name).upper()) and re.search(r"\bmini\b|mini-fast|runsOn.*mini", str(msg), re.I):
+        return ("HALO sends nothing to the Mac mini (Shaan 18 Oct): VPS + Cloudflare only; confirm this brief moves work "
+                "off the mini, not onto it. ")
+    return ""
+
+
+def recent_send(tid):
+    """The time of this orchestrator's last t3_thread_send to tid within 15 minutes, else None."""
+    try:
+        now = time.time()
+        last = None
+        for line in LOG.read_text().splitlines()[-500:]:
+            r = json.loads(line)
+            if r.get("kind") == "t3_thread_send" and r.get("thread") == tid:
+                if now - time.mktime(time.strptime(r["at"], "%Y-%m-%dT%H:%M:%S")) <= 900:
+                    last = r["at"]
+        return last
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def out(event, decision=None, reason=None, context=None, updated=None):
+    h = {"hookEventName": event}
+    if decision:
+        h["permissionDecision"] = decision
+        h["permissionDecisionReason"] = reason or ""
+    elif updated is not None:
+        h["permissionDecision"] = "allow"
+        h["updatedInput"] = updated
+    if context:
+        h["additionalContext"] = context
+    print(json.dumps({"hookSpecificOutput": h}))
+    sys.exit(0)
+
+
+def steered(ti):
+    """Shaan, 19 Oct: "messages should always auto steer". A send with no mode or `queue` goes as `auto`, which
+    steers a running turn (and starts an idle one) instead of waiting behind it; steer/restart are left alone."""
+    if ti.get("mode") in (None, "", "queue"):
+        return dict(ti, mode="auto")
+    return None
+
+
+def short(name):
+    return name.split("__")[-1]
+
+
+def pre(tool, ti):
+    t = short(tool)
+    if t == "t3_thread_send":
+        tid = ti.get("threadId", "")
+        rows = q("select title, archived_at, deleted_at, updated_at from orchestration_v2_projection_threads"
+                 " where thread_id=?", (tid,))
+        if rows is None:
+            return
+        if not rows and remote_seat(tid):
+            out("PreToolUse", context=mini_warning(remote_seat(tid), ti.get("message") or ti.get("prompt"))
+                + f"Seat {remote_seat(tid)} runs on another machine (runsOn): its thread is not in "
+                "this laptop's SISO Code, so it is not checked here. `seat which NAME` reads it live.",
+                updated=steered(ti))
+        if not rows:
+            out("PreToolUse", "deny", f"thread {tid} does not exist in SISO Code. Run `seat` (org chart with live titles)"
+                " or `seat which NAME`, then send to the thread it prints.")
+        title, arch, dele, upd = rows[0]
+        seat = seat_of(tid)
+        if arch or dele:
+            out("PreToolUse", "deny", f"thread {tid} ('{title}') is archived. Its seat ({seat or 'none'}) moved: run"
+                f" `seat which {seat or 'NAME'}`; if the chart is stale, fix it with `seat set`.")
+        at = recent_send(tid)
+        if at and not str(ti.get("message") or ti.get("prompt") or "").lstrip().startswith(("CORRECTION:", "NEW TOPIC:")):
+            out("PreToolUse", "deny", f"You sent this seat a message at {at[11:16]}; read its reply (t3_thread_read) first. "
+                "A second send within 15 minutes is refused unless it starts CORRECTION: (the first was wrong) or "
+                "NEW TOPIC: (another subject).")
+        note = (f"You sent this seat a message at {at[11:16]}; read its reply (t3_thread_read) before a second one. "
+                "A second message only if the first was wrong, and then one line. ") if at else ""
+        out("PreToolUse", context=note + mini_warning(seat or title, ti.get("message") or ti.get("prompt"))
+            + f"Sending to '{title}' (org chart: {seat or 'NOT IN ORG CHART'}; last active "
+            f"{(upd or '')[:16]}Z). If this is not the agent this message is for, stop and run `seat which NAME`."
+            + (" Mode set to auto: it steers the running turn (Shaan, 19 Oct)." if steered(ti) else ""),
+            updated=steered(ti))
+    # delegate_task children are left out: T3 rejects autoCompactWindow there (only effort, fastMode; 18 Oct).
+    if t in ("t3_thread_launch", "create_threads"):
+        for it in ti.get("threads") or [ti]:
+            sel = it.get("modelSelection") or it.get("target") or {}
+            opts = sel.get("options") or {}
+            if isinstance(opts, list):  # T3 sends options as [{id, value}]
+                opts = {o.get("id"): o.get("value") for o in opts if isinstance(o, dict)}
+            win = str(opts.get("autoCompactWindow") or "")
+            if "claude" in str(sel.get("model") or "").lower() and not (win.isdigit() and 0 < int(win) <= 330000):
+                out("PreToolUse", "deny", "A Claude seat or builder needs modelSelection.options.autoCompactWindow at most "
+                    "330000 (250000 for HALO seats; Shaan 18 Oct: 'the auto compacts cook'). Add it and send again.")
+    if t in ("t3_thread_launch", "create_threads"):
+        items = ti.get("threads") or [ti]
+        warn = "".join(mini_warning(it.get("title"), it.get("message") or it.get("prompt")) for it in items)
+        for it in items:
+            sel = it.get("modelSelection") or it.get("target") or {}
+            model = str(sel.get("model") or "")
+            title = str(it.get("title") or "")
+            msg = str(it.get("message") or it.get("prompt") or "")
+            if "opus" in model.lower() and not any(s in title.upper() for s in OPUS_SEATS) and "OPUS-REASON:" not in msg:
+                out("PreToolUse", "deny", "Opus is only for Agent Zero, AGENT-BASE, HALO, OPERATOR and MODEL-APP (Shaan 17 Oct). "
+                    "Seats run claude-sonnet-5-5; builders run codex gpt-6.1-sol. If Opus is truly needed, put "
+                    "'OPUS-REASON: <why>' in the message.")
+            if title:
+                dup = q("select thread_id from orchestration_v2_projection_threads where lower(title)=lower(?)"
+                        " and archived_at is null and deleted_at is null", (title,))
+                if dup:
+                    out("PreToolUse", context=warn + f"A live thread is already titled '{title}' ({dup[0][0]}). Reuse it "
+                        "(t3_thread_send) unless Shaan asked for a fresh one; after launching, record it: "
+                        "`seat set NAME <threadId> --note ...`.")
+        out("PreToolUse", context=warn + "After this launch, record the seat: `seat set NAME <threadId> --cwd DIR --note "
+            "'why'` so the org chart stays true.")
+    if t in ("Agent", "Task"):
+        st = str(ti.get("subagent_type") or "general-purpose")
+        model = str(ti.get("model") or "")
+        if model == "opus" or (not model and st in ("general-purpose", "claude", "Plan")):
+            out("PreToolUse", "deny", f"subagent_type {st} with model '{model or 'inherit = Opus'}'. Reads, searches "
+                "and checks: model 'haiku' (or subagent_type researcher/checker/Explore/scout). Builds: delegate_task to "
+                "codex gpt-6.1-sol. Sonnet only after a build failed its check twice.")
+        if model == "sonnet":
+            out("PreToolUse", context="Sonnet sub-agent: only for a build that failed on Codex twice, or judgement a "
+                "Haiku cannot do. If this is reading or checking, use model 'haiku'.")
+
+
+def agent_model(subagent):
+    """The model a named subagent runs on when the dispatch sets none: its agent file's frontmatter (scout = haiku)."""
+    if not subagent or "/" in subagent or subagent.startswith("."):
+        return ""
+    try:
+        for line in (HOME / ".claude/agents" / f"{subagent}.md").read_text().splitlines()[:12]:
+            if line.startswith("model:"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def post(tool, ti, resp, session):
+    t = short(tool)
+    rec = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": t, "parent": f"session:{session[:8]}",
+           "machine": "laptop", "workspace": None, "out": ""}
+    if t == "t3_thread_send":
+        tid = ti.get("threadId", "")
+        rows = q("select title from orchestration_v2_projection_threads where thread_id=?", (tid,)) or [("",)]
+        rec.update(name=seat_of(tid) or rows[0][0], thread=tid, brief=str(ti.get("message", ""))[:300])
+    elif t in ("t3_thread_launch", "create_threads", "delegate_task"):
+        sel = ti.get("modelSelection") or ti.get("target") or {}
+        rec.update(name=ti.get("title") or "", model=sel.get("model"), brief=str(ti.get("message") or ti.get("task")
+                   or json.dumps(ti.get("threads", ""))[:300])[:300], result=str(resp)[:300])
+    elif t in ("Agent", "Task"):
+        sub = str(ti.get("subagent_type") or "")
+        rec.update(name=ti.get("description", ""), model=ti.get("model") or agent_model(sub) or "inherit",
+                   subagent=ti.get("subagent_type"), brief=str(ti.get("prompt", ""))[:300])
+    else:
+        return
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def main():
+    try:
+        d = json.load(sys.stdin)
+        ev, tool, ti = d.get("hook_event_name"), d.get("tool_name", ""), d.get("tool_input") or {}
+        if ev == "PreToolUse":
+            pre(tool, ti)
+        elif ev == "PostToolUse":
+            post(tool, ti, d.get("tool_response"), d.get("session_id", ""))
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

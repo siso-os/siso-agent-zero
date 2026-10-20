@@ -138,7 +138,9 @@ def sample(fleets, rows):
     return sum(rows[p]['rss'] for p in seen)
 
 
-DISK_FLOOR_GB = float(os.environ.get('FLEET_DISK_FLOOR_GB', '10'))
+# Same pause line as estate storage-guard HOLD_GIB: 5 GiB never-write reserve + 10 GiB for one job's growth
+# (Shaan, 21 Oct: no made-up waits; the laptop's old 50 GiB had no evidence).
+DISK_FLOOR_GB = float(os.environ.get('FLEET_DISK_FLOOR_GB', '15'))
 
 
 def pressure():
@@ -320,8 +322,10 @@ def runner(name):
                 running = sum(x.get('status') in ('running', 'terminating') for x in jobs(m))
                 if running >= m['max'] or level != 'normal' or rss > cap + .5 * GIB or planned + reserve(fleets, cap) > cap:
                     break
-                if shutil.disk_usage(os.path.expanduser('~')).free < DISK_FLOOR_GB * GIB:
-                    m['note'] = f'disk below {DISK_FLOOR_GB} GB free: waiting'  # 3 Oct: the Mini hung with a full disk
+                # Only a disk in danger pauses new jobs; running jobs are unaffected.
+                disk_floor_gb = DISK_FLOOR_GB
+                if shutil.disk_usage(os.path.expanduser('~')).free < disk_floor_gb * GIB:
+                    m['note'] = f'disk below {disk_floor_gb} GiB free: waiting'
                     break
                 try:
                     d = workdir(m, j)
@@ -554,7 +558,7 @@ def backfill(a):
         for line in target.read_text().splitlines():
             try:
                 d = json.loads(line)
-                existing.add((d.get('kind'), d.get('name'), d.get('machine')))
+                existing.add((d.get('kind') or d.get('tool'), d.get('name') or d.get('seat'), d.get('machine')))
             except ValueError: pass
     count = 0
     machine = 'mini' if 'mini' in socket.gethostname().lower() else 'laptop'
@@ -597,7 +601,7 @@ def main():
     if sys.argv[1:2] == ['_remote-run']:
         req = json.load(sys.stdin)
         a = argparse.Namespace(**req)
-        a.C = a.C or str(ROOT / 'SISO_Agents/agent-zero/siso-agent-zero')
+        a.C = a.C or str(ROOT / '_data/worktrees/siso/main/agents/zero')
         start(a, req['ids'], req['contents'])
         return
     p = argparse.ArgumentParser(prog='fleet', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

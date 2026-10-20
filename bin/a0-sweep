@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+// a0-sweep: archive the finished helper threads (subagents and delegated tasks) that clutter SISO Code's tree.
+// Shaan, 17 Oct, after 240 of them were archived by hand one call at a time: "Should just make a command to do this".
+//
+//   a0-sweep                    archive every finished helper thread, all projects
+//   a0-sweep --project HALO     one project (its title or id)
+//   a0-sweep --age 60           only helpers quiet for at least this many minutes (default 60)
+//   a0-sweep --top-hours N      also archive unpinned top-level threads quiet for N hours, excluding seats/lineage
+//   a0-sweep --pinned-helpers-hours N  also archive pinned subagent helpers quiet for N hours
+//   a0-sweep --ids a,b          archive exactly these open thread ids (explicit override of automatic guards)
+//   a0-sweep --save FILE        write the shell snapshot to FILE
+//   a0-sweep --dry              print what it would archive, change nothing
+//   a0-sweep --plan-from FILE   pick from a saved shell snapshot instead of the live server (tests; implies --dry)
+//
+// Automatic picks exclude seats, forks/other lineage, busy threads and pending requests/background tasks.
+// By default only unpinned subagents quiet for --age are picked; the optional hour flags extend that selection.
+// --ids replaces automatic selection with the named open threads; --dry and --plan-from never archive anything.
+// Archive is reversible: the thread stays in SISO Code's Archived list. It talks to the live server (127.0.0.1:5490)
+// through the shared seat-fresh MCP client; metadata reads use SQLite mode=ro. Log: ~/.local/state/a0/a0-sweep.jsonl.
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+
+const HOME = os.homedir();
+const LOG = `${HOME}/.local/state/a0/a0-sweep.jsonl`;
+
+const argv = process.argv.slice(2);
+const flag = n => argv.includes(n);
+const opt = n => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+if (flag("-h") || flag("--help")) { console.log(readFileSync(new URL(import.meta.url), "utf8").split("\nimport ")[0].split("\n").slice(1).join("\n").replace(/^\/\/ ?/gm, "")); process.exit(0); }
+const ageMin = Number(opt("--age") ?? 60);
+const planFrom = opt("--plan-from");
+const dry = flag("--dry") || !!planFrom;
+const projectArg = opt("--project");
+const topHours = opt("--top-hours") == null ? null : Number(opt("--top-hours"));
+const pinnedHours = opt("--pinned-helpers-hours") == null ? null : Number(opt("--pinned-helpers-hours"));
+const idsArg = opt("--ids");
+const extraIds = new Set((idsArg ?? "").split(",").map(id => id.trim()).filter(Boolean));
+const saveTo = opt("--save");
+const seatIds = new Set();
+if (idsArg == null && (topHours != null || pinnedHours != null)) {
+  const collectSeats = value => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      if ((key === "thread" || key === "threadId") && typeof child === "string") seatIds.add(child);
+      else collectSeats(child);
+    }
+  };
+  collectSeats(JSON.parse(readFileSync(`${HOME}/.local/state/agent-base/t3-seats.json`, "utf8")));
+}
+
+const BUSY = new Set(["running", "starting", "queued", "pending", "preparing", "waiting"]);
+function pick(snapshot, { project, ageMin = 60, now = Date.now() } = {}) {
+  const projects = snapshot.projects ?? [];
+  const pid = project && (projects.find(p => p.id === project || (p.title || "").toLowerCase() === project.toLowerCase())?.id);
+  if (project && !pid) throw new Error(`no project named ${project}`);
+  const quiet = t => Math.max(...[t.updatedAt, t.latestRunCompletedAt, t.activityRunStartedAt].filter(Boolean).map(Date.parse), 0);
+  return (snapshot.threads ?? []).filter(t => {
+    if (t.archivedAt || t.deletedAt) return false;
+    if (idsArg != null) return extraIds.has(t.id);
+    if ((pid && t.projectId !== pid) || seatIds.has(t.id) ||
+        BUSY.has(t.status) || BUSY.has(t.activityRunStatus) ||
+        t.pendingRuntimeRequest || t.pendingBackgroundTasks?.length) return false;
+    const elapsed = now - quiet(t);
+    if (t.lineage?.relationshipToParent === "subagent") {
+      return t.pinnedAt ? pinnedHours != null && elapsed >= pinnedHours * 3600e3 : elapsed >= ageMin * 60e3;
+    }
+    return !t.lineage && !t.pinnedAt && topHours != null && elapsed >= topHours * 3600e3;
+  });
+}
+
+async function rpc() {
+  const child = spawn("python3", ["-B", fileURLToPath(new URL("a0-sweep-mcp.py", import.meta.url))],
+    { stdio: ["pipe", "pipe", "pipe"] });
+  const waiting = new Map();
+  let n = 0;
+  let ended = false;
+  const fail = () => {
+    ended = true;
+    for (const { no } of waiting.values()) no(new Error("sweep MCP bridge unavailable (details withheld)"));
+    waiting.clear();
+  };
+  child.on("error", fail);
+  child.on("exit", fail);
+  child.stdin.on("error", fail);
+  // The bridge reports sanitized errors through its protocol, never raw subprocess output.
+  child.stderr.resume();
+  createInterface({ input: child.stdout }).on("line", line => {
+    let reply;
+    try { reply = JSON.parse(line); } catch { fail(); return; }
+    const w = waiting.get(reply.id);
+    if (!w) return;
+    waiting.delete(reply.id);
+    reply.error ? w.no(new Error(reply.error)) : w.ok(reply.result);
+  });
+  const call = (tag, payload) => new Promise((ok, no) => {
+    if (ended) { no(new Error("sweep MCP bridge exited")); return; }
+    const id = String(++n);
+    waiting.set(id, { ok, no });
+    child.stdin.write(JSON.stringify({ id, tag, payload }) + "\n");
+  });
+  return { call, close: () => child.stdin.end() };
+}
+
+async function main() {
+  const live = planFrom ? null : await rpc();
+  try {
+    const shell = planFrom ? JSON.parse(readFileSync(planFrom, "utf8")) : await live.call("orchestration.subscribeShell", {});
+    const snapshot = shell.snapshot ?? shell;
+    if (saveTo) writeFileSync(saveTo, JSON.stringify(snapshot));
+    const picked = pick(snapshot, { project: projectArg, ageMin });
+    const names = Object.fromEntries((snapshot.projects ?? []).map(p => [p.id, p.title]));
+    const by = {};
+    for (const t of picked) by[names[t.projectId] ?? t.projectId] = (by[names[t.projectId] ?? t.projectId] ?? 0) + 1;
+    const helpers = (snapshot.threads ?? []).filter(t => !t.archivedAt && t.lineage?.relationshipToParent === "subagent").length;
+    if (dry) {
+      if (planFrom) for (const t of picked) console.log(`${names[t.projectId] ?? t.projectId}\t${t.status}\t${t.id}\t${(t.title || "").slice(0, 70)}`);
+      console.log(`would archive ${picked.length} of ${helpers} helper threads${Object.keys(by).length ? ": " + Object.entries(by).map(([k, v]) => `${k} ${v}`).join(", ") : ""}`);
+      return;
+    }
+    let done = 0; const failed = [];
+    for (let i = 0; i < picked.length; i += 25) {
+      const batch = picked.slice(i, i + 25);
+      const res = await Promise.allSettled(batch.map(t => live.call("orchestration.dispatchCommand",
+        { type: "thread.archive", commandId: `a0-sweep:${Date.now()}:${t.id}`, threadId: t.id })));
+      res.forEach((r, j) => r.status === "fulfilled" ? done++ : failed.push(`${batch[j].id}: ${r.reason.message}`));
+    }
+    const line = `archived ${done} of ${picked.length} finished helper threads (${helpers} helpers were open)` +
+      (Object.keys(by).length ? ": " + Object.entries(by).map(([k, v]) => `${k} ${v}`).join(", ") : "") +
+      (failed.length ? `; ${failed.length} failed, first: ${failed[0]}` : "");
+    console.log(line);
+    mkdirSync(`${HOME}/.local/state/a0`, { recursive: true });
+    appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), project: projectArg ?? "all", ageMin, archived: done, picked: picked.length, failed: failed.length, by }) + "\n");
+    if (failed.length) process.exitCode = 1;
+  } finally { live?.close(); }
+}
+
+main().catch(e => { console.error(`a0-sweep: ${e.message}`); process.exit(1); });

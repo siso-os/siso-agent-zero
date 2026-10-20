@@ -8,6 +8,8 @@ A miss is a bug in the house: move the fact to the right room or add it, then ad
 import datetime, json, os, re, subprocess, sys, tempfile
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+STATE = os.path.expanduser("~/.local/state/a0/house-check")
+os.makedirs(STATE, exist_ok=True)
 Q = json.load(open(os.path.join(HOME, "docs/house-check.json")))["questions"]
 brief = f"""TASK: house-check (Agent Zero memory test)
 You remember nothing. Working directory: {HOME}. Answer each question using only what is in this directory (start with AGENTS.md,
@@ -24,7 +26,7 @@ m = re.search(r"```json\s*(\[.*?\])\s*```", r.stdout, re.S)
 if not m:
     print("house-check: no answers came back\n" + r.stdout[-800:]); sys.exit(1)
 ans = {a["n"]: a for a in json.loads(m.group(1))}
-json.dump(ans, open(os.path.join(HOME, "docs/house-check.last.json"), "w"), indent=1)  # every answer, to read a miss
+json.dump(ans, open(os.path.join(STATE, "last.json"), "w"), indent=1)  # every answer, to read a miss
 score, misses = 0, []
 for i, x in enumerate(Q, 1):
     a = ans.get(i, {})
@@ -33,7 +35,7 @@ for i, x in enumerate(Q, 1):
     print(f"{'ok  ' if ok else 'MISS'} {i}. {x['q']}\n      -> {a.get('answer', '(none)')[:200]}  [{a.get('source', '')}]")
     if not ok: misses.append(i)
 print(f"house-check: {score}/{len(Q)}")
-with open(os.path.join(HOME, "docs/passes.jsonl"), "a") as f:
+with open(os.path.join(STATE, "passes.jsonl"), "a") as f:
     f.write(json.dumps({"at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "label": "house-check",
                         "house_check": f"{score}/{len(Q)}", "misses": misses}) + "\n")
 sys.exit(0 if score == len(Q) else 1)

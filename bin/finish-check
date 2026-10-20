@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""finish-check: is a project finishing work, or only producing PRs?
+
+Usage: finish-check OWNER/REPO BRANCH LEDGER_PATH [HOURS] [AT_ISO_UTC]
+  e.g. finish-check HALO-AGENCY/halo-streaming halo/v2 v2/docs/ledger.json 3
+
+Compares the ledger now with the ledger HOURS ago (rows that became "works"),
+against PRs merged in the same window. Prints GREEN or the tripwires hit.
+Why: 16 Oct 2026, 119 HALO PRs moved go-live plan rows from 5 of 30 to 5 of 30.
+"""
+import base64, datetime as dt, json, re, subprocess, sys
+
+def gh(*a):
+    return json.loads(subprocess.run(["gh", *a], check=True, capture_output=True, text=True).stdout or "null")
+
+def rows(ledger):
+    out = {}
+    for r in ledger.get("features", []):
+        out[r["id"]] = r
+    plan = ledger.get("plan", {})
+    for r in (plan.get("items", []) if isinstance(plan, dict) else []):
+        out[r["id"]] = r
+    return out
+
+def ledger_at(repo, ref, path):
+    c = gh("api", f"repos/{repo}/contents/{path}?ref={ref}")
+    return json.loads(base64.b64decode(c["content"]))
+
+def main():
+    if len(sys.argv) < 4:
+        print(__doc__); sys.exit(2)
+    repo, branch, path = sys.argv[1:4]
+    hours = float(sys.argv[4]) if len(sys.argv) > 4 else 3
+    at = (dt.datetime.fromisoformat(sys.argv[5].replace("Z", "+00:00")) if len(sys.argv) > 5
+          else dt.datetime.now(dt.timezone.utc))
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    since, until = (at - dt.timedelta(hours=hours)).strftime(fmt), at.strftime(fmt)
+
+    def ref_at(t):
+        c = gh("api", f"repos/{repo}/commits?sha={branch}&path={path}&until={t}&per_page=1")
+        return c[0]["sha"] if c else None
+
+    now = rows(ledger_at(repo, ref_at(until) or branch, path))
+    old = ref_at(since)
+    then = rows(ledger_at(repo, old, path)) if old else {}
+    closed = [k for k, r in now.items() if r.get("state") == "works" and then.get(k, {}).get("state") != "works"]
+
+    prs = gh("pr", "list", "-R", repo, "--state", "merged", "--base", branch,
+             "--search", f"merged:{since}..{until}", "--limit", "300", "--json", "number,title,headRefName,mergedAt")
+    repair = [p for p in prs if re.search(r"\b(test|ci|red|green|flake|fixture|repair|revert)\b",
+                                          (p["title"] + " " + p["headRefName"]).lower()) and "feat" not in p["title"].lower()]
+    open_rows = {k: r for k, r in now.items() if r.get("state") not in ("works", "dropped")}
+    parked = [k for k, r in open_rows.items()
+              if re.search(r"pending|needs shaan|acceptance|unprov|remain|not deployed|later", (r.get("note") or "").lower())]
+    plan = [r for r in now.values() if re.match(r"^M\d", str(r.get("id", "")))]
+    plan_works = sum(1 for r in plan if r.get("state") == "works")
+
+    print(f"{repo}@{branch}, last {hours:g}h: {len(prs)} PRs merged, {len(closed)} rows closed, "
+          f"plan works {plan_works} of {len(plan)}, open rows {len(open_rows)}")
+    trips = []
+    if len(prs) >= 5 and len(closed) * 5 < len(prs):
+        trips.append(f"SLICING: {len(prs)} PRs, {len(closed)} rows closed. One owner carries a row to works before the next.")
+    if prs and len(repair) / len(prs) > 0.15:
+        trips.append(f"JAM: {len(repair)} of {len(prs)} PRs are test/CI repair. Too many writers; go to one.")
+    if len(parked) >= 5:
+        trips.append(f"PARKED: {len(parked)} of {len(open_rows)} open rows wait on proof/acceptance/later. "
+                     f"Prove it now or write the next action: {', '.join(parked[:6])}")
+    if len(prs) < 3 and not closed and open_rows:
+        trips.append(f"IDLE: {len(prs)} PRs and 0 rows closed in {hours:g}h with {len(open_rows)} rows open.")
+    for t in trips:
+        print("RED", t)
+    if not trips:
+        print("GREEN")
+    sys.exit(1 if trips else 0)
+
+if __name__ == "__main__":
+    main()

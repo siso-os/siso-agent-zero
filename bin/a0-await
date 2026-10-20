@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""a0-await [SEAT ...] [--all] [--quiet-min N] [--max-min M]
+
+Wakes Agent Zero when a seat is really done, not at every in-between stop (Shaan, 18 Oct: "when agents are done they
+should ping you ... Not bullshit stuff in between"). Run it with run_in_background after every dispatch to a seat;
+its exit is the ping. A seat counts as done when its turn has completed, no queued send or delegated child run of that
+seat is still live in SISO Code (its state DB), and its last words are a real report (over 600 characters or a link)
+that does not say it is still waiting; a short or waiting turn counts done only after --quiet-min of silence (default
+12). A seat with an open question (a user-input request it is waiting on) exits at once as NEEDS ANSWER, with its last
+words. A live run fleet-check flags STUCK (nothing written for its stuck threshold) exits at once as STUCK. Exits on the first seat done (or on all of them with --all) and prints each done seat's last words, redacted
+(setup and d links, password values). With --all and no SEAT it watches every out seat: sent to, not closed in
+~/.local/state/a0/closed.jsonl. Polls fleet-check (0 tokens) every 60 s; gives up after --max-min (default 240).
+"""
+import argparse, json, os, re, sqlite3, subprocess, sys, time
+from datetime import datetime
+
+DB = os.path.expanduser("~/.local/state/siso-code/userdata/statev2.sqlite")
+LOG = os.path.expanduser("~/.local/state/a0/dispatch.jsonl")
+CLOSED = os.path.expanduser("~/.local/state/a0/closed.jsonl")
+LIVE = ("queued", "preparing", "starting", "running", "waiting")
+# Words still gate it too: a Claude seat waiting on a background shell has no child run in the DB (four false pings on
+# 18 Oct). A seat that says it is still working counts done only after --quiet-min of silence.
+WAITING = re.compile(r"\b(background|still running|running the|waiting|in progress|once (they|it) finish|"
+                     r"will wake|kicked off|shots run|build is running|(is|are) running|running on|"
+                     r"wakes? (this|the) (thread|seat)|wake (this|the) (thread|seat)|automatically wake|"
+                     r"children wake|pending|woken|be woken|shipping to|is shipping|walk after|wakes? me|"
+                     r"when it finishes|when they finish|still \w+ing|are still|is still|"
+                     r"i'll (carry on|continue|report) when|(i'll|will) wait|wait for|before touching|"
+                     r"i build|i'll (build|write|run|fix|ship|do|make|test|send|start|finish|add)|i'?m now|i am now|"
+                     r"i'?m (going to|about to)|next,? i)\b|\u23f3", re.I)
+REDACT = ((re.compile(r"(/setup/|/d#|/d/)[A-Za-z0-9_-]+"), r"\1<redacted>"),
+          (re.compile(r"(?i)(password\W{0,6}`?)[A-Za-z0-9!@#$%^&*_+=-]{6,}"), r"\1<redacted>"))
+
+def quiet_min(s):
+    m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m?)?", (s or "").strip())
+    if not m or not any(m.groups()):
+        return 0
+    d, h, mi = (int(x or 0) for x in m.groups())
+    return d * 1440 + h * 60 + mi
+
+def fleet():
+    out = subprocess.run(["fleet-check", "--json"], capture_output=True, text=True, timeout=120).stdout
+    return {r["seat"]: r for r in json.loads(out or "[]")}
+
+def redact(s):
+    for rx, rep in REDACT:
+        s = rx.sub(rep, s)
+    return s
+
+def real_report(s):
+    """A report worth a ping: over 600 characters, or a link to show him."""
+    return len(s) > 600 or "https://" in s
+
+def out_seats(names):
+    """Seats Agent Zero sent work to and has not closed: the last send is later than the last close."""
+    def when(v):
+        if isinstance(v, (int, float)):
+            return datetime.fromtimestamp(v)
+        m = re.match(r"\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?", str(v or ""))
+        return datetime.fromisoformat(m.group(0)) if m else None
+    sent, closed = {}, {}
+    for path, book in ((LOG, sent), (CLOSED, closed)):
+        if not os.path.exists(path):
+            continue
+        for line in open(path):
+            try:
+                r = json.loads(line)
+                t = when(r.get("at"))
+            except (ValueError, AttributeError, OverflowError):
+                continue
+            if r.get("name") in names and t:
+                book[r["name"]] = max(t, book.get(r["name"], t))
+    return [s for s in names if s in sent and (s not in closed or sent[s] > closed[s])]
+
+def pending_children(thread):
+    """Live child runs under this seat: threads whose payload lineage.rootThreadId is the seat's thread (delegate_task
+    children and their children). Child ids carry a per-session command id, not the seat's, so match on lineage.
+    None = could not tell (treated as not done)."""
+    if not thread:
+        return None
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        q = ("select count(*) from orchestration_v2_projection_runs r "
+             "join orchestration_v2_projection_threads t on t.thread_id = r.thread_id "
+             "where t.thread_id != ? and (json_extract(t.payload_json, '$.lineage.rootThreadId') = ? "
+             "or json_extract(t.payload_json, '$.lineage.parentThreadId') = ?) "
+             f"and r.status in ({','.join('?' * len(LIVE))})")
+        return db.execute(q, (thread, thread, thread, *LIVE)).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+def queued_runs(thread):
+    """Sends queued on this seat's own thread, not started yet. None = could not tell."""
+    if not thread:
+        return None
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        return db.execute("select count(*) from orchestration_v2_projection_runs where thread_id = ? "
+                          "and status = 'queued'", (thread,)).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+def pending_questions(thread):
+    """Open user-input requests on this seat's thread: the seat asked a question and is stuck until someone answers.
+    [] = none or could not tell."""
+    if not thread:
+        return []
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return []
+    try:
+        return db.execute("select kind, created_at from orchestration_v2_projection_runtime_requests "
+                          "where thread_id = ? and status = 'pending'", (thread,)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+
+def stuck(r):
+    """A live run fleet-check flags STUCK: nothing written for its --stuck-min (u090; LEDGER 20 Oct: HALO-MONO hung 2h45
+    and showed 'running'). Not stuck while a child run of the seat is still live; that child is waiting, not hung."""
+    return bool(r) and any(str(p).startswith("STUCK") for p in r.get("problems") or []) and pending_children(r.get("thread")) == 0
+
+def done(r, qmin):
+    if not r or r.get("status") != "completed":
+        return False
+    thread = r.get("thread")
+    if pending_children(thread) != 0 or queued_runs(thread) != 0:
+        return False  # a live child run, a queued send, or unknown is never done
+    said = r.get("said_full") or r.get("said") or ""
+    if quiet_min(r.get("activity")) >= qmin:
+        return True
+    return real_report(said) and not WAITING.search(said)
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[1])
+    ap.add_argument("seats", nargs="*")
+    ap.add_argument("--all", action="store_true", help="wait until every seat is done (no SEAT: every out seat)")
+    ap.add_argument("--quiet-min", type=int, default=12)
+    ap.add_argument("--max-min", type=int, default=240)
+    a = ap.parse_args()
+    if not a.seats:
+        if not a.all:
+            ap.error("name the seats, or pass --all to watch every out seat")
+        try:
+            a.seats = out_seats(list(fleet()))
+        except Exception as e:
+            ap.error(f"fleet-check failed: {e}")
+        if not a.seats:
+            print("nothing out")
+            return 0
+    time.sleep(90)  # a send takes a moment to start the seat's turn; don't read the old 'completed'
+    end, seen, asked, hung = time.time() + a.max_min * 60, {}, {}, {}
+    while time.time() < end:
+        try:
+            f = fleet()
+        except Exception as e:  # fleet-check hiccup: try again next minute
+            print(f"fleet-check failed: {e}", file=sys.stderr); time.sleep(60); continue
+        for s in a.seats:
+            r = f.get(s)
+            if s in seen:
+                continue
+            q = pending_questions(r and r.get("thread"))  # a stuck question exits at once, whatever the status
+            if q:
+                seen[s], asked[s] = r, q
+            elif stuck(r):  # a hung run exits at once, whatever --all says
+                seen[s], hung[s] = r, quiet_min(r.get("activity"))
+            elif done(r, a.quiet_min):
+                seen[s] = r
+        if seen and (not a.all or len(seen) == len(a.seats) or hung):
+            for s, r in seen.items():
+                words = redact(r.get("said_full") or "")[-1500:]
+                if s in hung:
+                    print(f"STUCK {s} quiet {hung[s]}m (run live, nothing written; check it): {words}")
+                    continue
+                if s in asked:
+                    print(f"NEEDS ANSWER {s} (question open since {asked[s][0][1]}; answer it or relay it): {words}")
+                    continue
+                print(f"DONE {s} (quiet {r.get('activity')}): {words}")
+            left = [s for s in a.seats if s not in seen]
+            if left:
+                print("still working: " + " ".join(left))
+            return 0
+        time.sleep(60)
+    print("timeout; none done: " + " ".join(s for s in a.seats if s not in seen))
+    return 2
+
+if __name__ == "__main__":
+    sys.exit(main())

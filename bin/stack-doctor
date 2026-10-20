@@ -7,8 +7,10 @@ live endpoints); none trusts a flag. Rules come from the brain (siso-harness-lab
 (siso-firstmate .agents/a0/specs/2026-10-03-stack-first-principles/).
 
   stack-doctor [--json] [--hours H]     exit 0 = no red, 1 = at least one red
+  stack-doctor --orphans                ORPHAN lines, and DISK under 10 GB free (SessionStart hook); exit 0 always
 """
 import argparse, glob, json, os, re, subprocess, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
 WS = os.path.join(HOME, "SISO_Workspace")
@@ -45,14 +47,54 @@ def tail_lines(path, n=400_000):
         return f.read().decode("utf-8", "ignore").splitlines()
 
 
-def claude_processes():
-    pids = sh("pgrep", "-f", r"\.local/share/claude/versions/").split()
+def claude_rows():
     rows = []
-    for p in pids:
+    for p in sh("pgrep", "-f", r"\.local/share/claude/versions/").split():
         env = sh("ps", "eww", "-o", "command=", "-p", p)
         cfg = (re.search(r"CLAUDE_CONFIG_DIR=(\S+)", env) or [None, HOME + "/.claude"])[1]
         auto = re.search(r"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=(\S+)", env)
-        rows.append({"pid": p, "config": cfg, "autocompact": auto[1] if auto else None})
+        sess = re.search(r"--(?:resume|session-id)[= ](\S+)", env)
+        rows.append({"pid": p, "config": cfg, "autocompact": auto[1] if auto else None, "session": sess[1] if sess else None,
+                     "ppid": sh("ps", "-o", "ppid=", "-p", p).strip()})
+    return rows
+
+
+def orphans():
+    """--orphans (SessionStart hook): a ppid-1 Claude on the session of a live seat. Silent when none."""
+    seats = live_claude_sessions()
+    for r in claude_rows():
+        if r["ppid"] == "1" and r["session"] in seats:
+            print(f"ORPHAN pid {r['pid']} (same session as {seats[r['session']]})")
+
+
+def disk_warn():
+    """--orphans (SessionStart hook): under 10 GB free on the laptop, name the biggest growers. Silent otherwise."""
+    free = int(sh("df", "-k", "/System/Volumes/Data").splitlines()[-1].split()[3]) / 1048576
+    if free >= 10:
+        return
+    paths = [HOME + "/.claude/projects", "/private/tmp"] + glob.glob(HOME + "/.local/opt/actions-runner-*/_work")
+    with ThreadPoolExecutor(len(paths)) as ex:
+        sizes = dict(zip(paths, ex.map(du_gb, paths)))
+    print(f"DISK {free:.1f} GB free on the laptop (under 10). Biggest growers:")
+    for p in sorted(paths, key=lambda p: -(sizes[p] or 0)):
+        print(f"  {'not measured (over 6 s)' if sizes[p] is None else f'{sizes[p]:.1f} GB'}  {p.replace(HOME, '~')}")
+
+
+def du_gb(path):
+    try:
+        return int(subprocess.run(["du", "-sk", path], capture_output=True, text=True, timeout=6).stdout.split()[0]) / 1048576
+    except Exception:
+        return None
+
+
+def claude_processes():
+    rows = claude_rows()
+    # A second writer on one session: an orphan (ppid 1, left behind by a relaunch) next to the live process on the same session.
+    seats = live_claude_sessions()
+    for r in rows:
+        twin = [x for x in rows if r["session"] and x["session"] == r["session"] and x["ppid"] != "1"]
+        if r["ppid"] == "1" and r["session"] and twin:
+            add("red", "claude-orphan", f"ORPHAN pid {r['pid']} (same session as {seats.get(r['session']) or 'pid ' + twin[0]['pid']})")
     names = {}
     try:
         for a in json.loads(sh("herdr", "agent", "list"))["result"]["agents"]:
@@ -278,7 +320,15 @@ def main():
     p = argparse.ArgumentParser(prog="stack-doctor", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--json", action="store_true")
     p.add_argument("--hours", type=float, default=6)
+    p.add_argument("--orphans", action="store_true")
     a = p.parse_args()
+    if a.orphans:
+        for fn in (orphans, disk_warn):
+            try:
+                fn()
+            except Exception:
+                pass
+        return 0
     for fn in (claude_processes, turns_today, lambda: claude_models_and_context(a.hours), lambda: codex(a.hours), agent_base, machines, renewals):
         try:
             fn()

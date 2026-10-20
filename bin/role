@@ -9,11 +9,12 @@
 #   role own <name> [N]  up to N runs (default 4); stop on blocked or two consecutive runs that change nothing
 set -eu
 Z="$(cd "$(dirname "$0")/.." && pwd)"
+R="${A0_ROLE_STATE:-$HOME/.local/state/a0/role-ledgers}"; mkdir -p "$R"
 if [ "${1:-}" = own ]; then
   n="${2:?role}"; max="${3:-4}"; still=0; i=0
   while [ $i -lt "$max" ] && [ $still -lt 2 ]; do
     i=$((i+1))
-    "$0" run "$n" >/dev/null; last=$(tail -1 "$Z/roles/$n.jsonl")
+    "$0" run "$n" >/dev/null; last=$(tail -1 "$R/$n.jsonl")
     printf '%s\n' "$last" | python3 -c 'import json,re,sys; sys.exit(0 if re.match(r"blocked\b", str(json.load(sys.stdin).get("status", "")).strip(), re.I) else 1)' && break
     echo "$last" | grep -q '"changed": null\|nothing\|no processes stopped' && still=$((still+1)) || still=0
   done
@@ -25,7 +26,7 @@ if [ "${1:-}" = start ]; then
   n="${2:?role}"; model=$(python3 -c "import json;print(json.load(open('$Z/routing.json')).get('roles_model','gpt-6.1-sol'))" 2>/dev/null || echo gpt-6.1-sol)
   exec "$AB" install --harness codex --name "$(CHAT "$n")" --label "com.siso.host-$(CHAT "$n")" --model "$model" --effort high --cwd "$(HOMEOF "$n")"; fi
 if [ "${1:-}" != run ]; then
-  for f in "$Z"/roles/*.md; do n=$(basename "$f" .md); l=$(tail -1 "$Z/roles/$n.jsonl" 2>/dev/null || true)
+  for f in "$Z"/roles/*.md; do n=$(basename "$f" .md); l=$(tail -1 "$R/$n.jsonl" 2>/dev/null || true)
     printf '%-10s %s\n' "$n" "${l:-never run}" | cut -c1-220; done; exit 0; fi
 n="${2:?role name}"; f="$Z/roles/$n.md"; [ -f "$f" ] || { echo "no role $n"; exit 2; }
 # Renewable spend (Shaan, 8 Oct ~20:45: "make it so they don't fill up as fast ... we actually keep the work that we gain"):
@@ -33,14 +34,14 @@ n="${2:?role name}"; f="$Z/roles/$n.md"; [ -f "$f" ] || { echo "no role $n"; exi
 sent="$HOME/.local/state/a0/role-sent-$n"; sum=$(shasum "$f" | cut -c1-40)
 b=$(mktemp); { echo "TASK: role-$n ($(date '+%-d %b %Y %H:%M'))"; echo
   if [ "$(cat "$sent" 2>/dev/null)" = "$sum" ]; then echo "Your role ($f) is unchanged since your last turn and still binds. Continue your goal from your PLAN and HANDOFF; re-read nothing you already hold."
-  else cat "$f"; fi; echo; echo "## Your last runs (ledger)"; tail -3 "$Z/roles/$n.jsonl" 2>/dev/null || echo "none yet";
+  else cat "$f"; fi; echo; echo "## Your last runs (ledger)"; tail -3 "$R/$n.jsonl" 2>/dev/null || echo "none yet";
   echo; echo "Do real work this run: measure your number first, do the work, measure again. Keep a list of what you changed (paths, commands)."
   echo "Budget: finish this turn within 45 minutes; whatever is left goes in your PLAN for the next turn (Shaan, 8 Oct: agents that run for hours and hang)."
   echo "End your reply with three lines exactly: STATUS: done|blocked — <one line>; NUMBER: <name of number> <before> -> <after>; CHANGED: <what, paths>"; } > "$b"
-echo "$sum" > "$sent"; out="$Z/roles/.last-$n.out"; rc=0; "$AB" send --name "$(CHAT "$n")" --prompt-file "$b" --timeout 3600 > "$out" 2>&1 || rc=$?
+echo "$sum" > "$sent"; out="$R/.last-$n.out"; rc=0; "$AB" send --name "$(CHAT "$n")" --prompt-file "$b" --timeout 3600 > "$out" 2>&1 || rc=$?
 [ $rc = 2 ] && echo "STATUS: blocked — its chat is not running (role start $n)" >> "$out"
 [ $rc = 3 ] && echo "STATUS: still working after 90 min (see its chat)" >> "$out"
-python3 - "$Z/roles/$n.jsonl" "$out" <<'PY'
+python3 - "$R/$n.jsonl" "$out" <<'PY'
 import json, sys, datetime, re
 t = open(sys.argv[2], errors="ignore").read()
 num = re.search(r"NUMBER:\s*(.+)", t); st = re.search(r"STATUS:\s*(.+)", t); ch = re.search(r"CHANGED:\s*(.+)", t)
@@ -48,4 +49,4 @@ open(sys.argv[1], "a").write(json.dumps({"at": datetime.datetime.now().astimezon
   "number": num.group(1).strip() if num else None, "status": st.group(1).strip()[:200] if st else "no RETURN",
   "changed": ch.group(1).strip()[:300] if ch else None}) + "\n")
 PY
-rm -f "$b"; [ "$n" = scout ] && { "$Z/bin/research-sync" >/dev/null 2>&1 || true; }; tail -1 "$Z/roles/$n.jsonl"
+rm -f "$b"; [ "$n" = scout ] && { "$Z/bin/research-sync" >/dev/null 2>&1 || true; }; tail -1 "$R/$n.jsonl"

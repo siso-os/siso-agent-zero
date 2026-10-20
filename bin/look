@@ -11,6 +11,7 @@ fleets, jobs, git, launchd). This answers all of them at once, in at most ~30 li
 import glob, json, os, subprocess, sys, datetime, re, math
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
 H = os.path.expanduser("~")
 RUNNER = f"{H}/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base/ship-runner"
 
@@ -120,7 +121,7 @@ def jobs():
 
 def tasks():
     rows = []
-    for f in glob.glob(f"{HOME}/tasks/*.json"):
+    for f in glob.glob(f"{DATA_HOME}/tasks/*.json"):
         if f.endswith("INDEX.json"):
             continue
         try:
@@ -146,7 +147,7 @@ def roles():
 
 
 def his_words():
-    days = sorted(glob.glob(f"{HOME}/.agents/a0/transcript/raw/*.jsonl"))[-1:]
+    days = sorted(glob.glob(f"{DATA_HOME}/.agents/a0/transcript/raw/*.jsonl"))[-1:]
     rows = [json.loads(l) for d in days for l in open(d) if l.strip()]
     return [f"{r['at'][11:16]} {r['text'][:110]}" for r in rows[-3:]]
 

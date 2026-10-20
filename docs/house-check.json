@@ -2,17 +2,11 @@
  "_why": "Questions a session that remembers nothing must answer from the house alone (docs/HOUSE.md). Each 'expect' is a list of alternatives; any one (case-insensitive substring) counts. Add a question whenever a recall miss happens.",
  "questions": [
   {
-   "q": "Is the Codex (ChatGPT Pro) plan being renewed, and what should its remaining credits be used for?",
+   "q": "What is Shaan's latest 6 October direction on usage and intended Claude/Codex purchases, and does this prove billing?",
    "expect": [
-    "not renew",
-    "not being renewed",
-    "not be renewed",
-    "isn't renewed",
-    "is not renewed",
-    "won't be renewed",
-    "no. use",
-    "no, use",
-    "no. the"
+    "planning assumption",
+    "not verified billing",
+    "not billing proof"
    ]
   },
   {
@@ -22,7 +16,7 @@
    ]
   },
   {
-   "q": "Which project currently has all five things Agent Zero's loop needs?",
+   "q": "Which project was recorded as having all five things in the historical 4 October project audit (current readiness must be verified separately)?",
    "expect": [
     "agent base"
    ]

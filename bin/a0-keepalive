@@ -13,6 +13,7 @@ SENDER="${A0_KEEPALIVE_SENDER:-}"
 NOTIFIER="${A0_KEEPALIVE_NOTIFIER:-osascript}"
 HOSTS_DIR="${A0_KEEPALIVE_HOSTS_DIR:-$HOME/.local/state/agent-base/hosts}"  # siso-host writes <pane>.json {pid, session, pane}
 PAUSE_FILE="$STATE_DIR/keepalive.pause"
+T3_SEATS="${A0_KEEPALIVE_T3_SEATS:-$HOME/.local/state/agent-base/t3-seats.json}"  # seats handed to SISO Code (bin/seat-to-t3)
 LOCK_DIR="$STATE_DIR/keepalive.lock"
 
 mkdir -p "$STATE_DIR"
@@ -183,6 +184,10 @@ check() {
   printf '%s\n' "$$" > "$LOCK_DIR/pid"
   trap 'rm -f "$LOCK_DIR/pid"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
   local record why count pane_id workspace created selected busy
+  # A seat handed to SISO Code (bin/seat-to-t3) runs there now; resuming its pane would bring back a second Agent Zero.
+  if [[ -f "$T3_SEATS" ]] && /usr/bin/python3 -c 'import json,sys; sys.exit(0 if any(v.get("pane")==sys.argv[2] for v in json.load(open(sys.argv[1])).values()) else 1)' "$T3_SEATS" "$PANE" 2>/dev/null; then
+    rm -f "$STATE_DIR/no-claude-count"; return 0
+  fi
   if host_alive; then rm -f "$STATE_DIR/no-claude-count"; return 0; fi
   record="$(pane_record "$PANE")"
   if [[ -n "$record" ]] && is_alive "$record"; then rm -f "$STATE_DIR/no-claude-count"; return 0; fi

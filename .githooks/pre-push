@@ -1,0 +1,28 @@
+#!/bin/sh
+# Scan every commit a push sends with gitleaks. Any finding, a missing gitleaks or a failed scan blocks the push.
+# Enable once per clone: git config core.hooksPath .githooks
+# Git passes one line per ref on stdin: <local ref> <local sha> <remote ref> <remote sha>.
+
+zero=0000000000000000000000000000000000000000
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-push: gitleaks is not on PATH; push blocked (install it, or git push --no-verify after a manual scan)" >&2
+  exit 1
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha --not --remotes"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  gitleaks git --log-opts="$range" --redact --no-banner --log-level warn
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "pre-push: gitleaks exit $status on $local_ref ($range); push blocked" >&2
+    exit 1
+  fi
+done
+
+exit 0
