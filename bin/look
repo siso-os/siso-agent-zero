@@ -8,12 +8,18 @@ fleets, jobs, git, launchd). This answers all of them at once, in at most ~30 li
   look          the screen
   look --json   the same, for a script
 """
-import glob, json, os, subprocess, sys, datetime, re, math
+import glob, json, os, subprocess, sys, datetime, re, math, sqlite3
+from pathlib import Path
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from a0_data_home import resolve_data_home
+from a0_self import warnings as self_warnings
+
+DATA_HOME = str(resolve_data_home()) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
+PRIVATE_HOME = os.environ.get("A0_PRIVATE_HOME", os.path.expanduser("~/.local/state/a0/private"))
 H = os.path.expanduser("~")
-RUNNER = f"{H}/SISO_Workspace/_data/worktrees/siso-internal-labs-agent-base/ship-runner"
+RUNNER = f"{H}/SISO_Workspace/_data/worktrees/siso/live"
 
 
 def sh(*cmd, timeout=40):
@@ -147,13 +153,40 @@ def roles():
 
 
 def his_words():
-    days = sorted(glob.glob(f"{DATA_HOME}/.agents/a0/transcript/raw/*.jsonl"))[-1:]
+    days = sorted(glob.glob(f"{PRIVATE_HOME}/transcript/raw/*.jsonl"))[-1:]
     rows = [json.loads(l) for d in days for l in open(d) if l.strip()]
     return [f"{r['at'][11:16]} {r['text'][:110]}" for r in rows[-3:]]
 
 
+def upgrades():
+    state = Path(os.environ.get('A0_UPGRADES_FILE', f'{H}/.local/state/a0/upgrades.jsonl'))
+    latest, merged_at = {}, {}
+    for line in state.read_text().splitlines() if state.exists() else []:
+        try:
+            row = json.loads(line)
+            uid = row['id']
+            latest[uid] = {**latest.get(uid, {}), **row}
+            if row.get('status') == 'merged':
+                merged_at[uid] = timestamp(row.get('at'))
+        except (ValueError, KeyError, TypeError):
+            continue
+    now = datetime.datetime.now().timestamp()
+    recent = sorted((uid for uid, at in merged_at.items() if at is not None and 0 <= now - at <= 7 * 86400
+                     and latest[uid].get('status') == 'merged'), key=merged_at.get, reverse=True)
+    return [f'{len(recent)} merged in the last 7 days'] + [
+        f"{uid}: {' '.join((latest[uid].get('lesson') or latest[uid].get('why') or 'No lesson recorded').split())[:80]}"
+        for uid in recent[:4]]
+
+
 def main():
-    sections = [("Stack", doctor()), ("Shipping", shipping()), ("Out (sent, not back yet)", jobs()), ("Tasks", tasks()), ("Pipeline", pipeline()), ("Roles (estate, health, efficiency)", roles()), ("His latest words", his_words())]
+    from owner_idle import summary
+    try:
+        owner_line = summary()
+    except (OSError, ValueError, KeyError, sqlite3.Error) as error:
+        owner_line = 'Owners: idle compaction unobserved (' + type(error).__name__ + ')'
+    sections = [("Stack", doctor() + self_warnings(Path(HOME), Path(DATA_HOME))), ("Shipping", shipping()), ("Out (sent, not back yet)", jobs()), ("Tasks", tasks()), ("Pipeline", pipeline()), ("Roles (estate, health, efficiency)", roles()), ("His latest words", his_words())]
+    sections.insert(1, ('Owners', [owner_line]))
+    sections.insert(2, ('Upgrades', upgrades()))
     if "--json" in sys.argv:
         print(json.dumps(dict(sections), indent=1)); return 0
     for name, lines in sections:

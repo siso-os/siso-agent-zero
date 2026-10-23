@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""fleet-status — the three numbers and the fleet table for one team, from the machine, not from anyone's word.
+
+  fleet-status --team-dir <companion repo> [--json <out.json>]
+
+Reads team.yaml (herdr space, code checkout, releases dir, handoffs dir), asks BOTH substrates who is
+alive, reads each agent's statusline for context % and $, and computes the three numbers an Agent Zero
+watches instead of polling: commits landed on the trunk today, deploys today, handoffs today.
+Flat for an hour means a rule is wrong, not an owner.
+
+Two substrates, EVERY machine, one table (LABS-29, 2026-09-12). Every row carries `substrate`
+and `machine`, because "the fleet" is not one box:
+  herdr  panes in a herdr server. Root's on the VPS (read through the az-deliver `__fleet__`
+         verb); the Macs' over ssh, one machine per entry in team.yaml `herdr.machines`.
+  orca   Orca terminals on the VPS, read from `orca worktree ps --json` and
+         `orca terminal list --include-visual-layouts --json`. These are the ones Shaan sees when
+         he opens the Agents tab, so a fleet table that omitted them would disagree with his screen.
+
+Three rules this tool exists to keep:
+  * A machine that cannot be reached is a ROW saying so, never a silent omission. A table that
+    quietly drops the laptop reads exactly like a laptop with no agents on it.
+  * `unknown` is not a status, it is a missing answer. A pane whose herdr reports no agent
+    process holds no agent: it is a bare shell and it is reported `stale`, with the evidence.
+  * An age is only printed when the substrate actually records one. Orca keeps `lastOutputAt`;
+    this herdr build keeps no per-pane timestamp at all, so its stale rows say `age unrecorded`
+    rather than carry a number someone would trust.
+"""
+import argparse, datetime, glob, json, os, re, subprocess, sys, time
+try:
+    import yaml
+except ImportError:
+    sys.exit("fleet-status: python3-yaml is required (pip install pyyaml)")
+
+def sh(args, cwd=None):
+    try: return subprocess.run(args, capture_output=True, text=True, cwd=cwd, timeout=30).stdout
+    except Exception: return ""
+
+
+def _age_s(ms):
+    """Seconds since an epoch-ms timestamp, or None when the substrate recorded none."""
+    if not ms:
+        return None
+    return max(0, int(time.time() - (ms / 1000.0)))
+
+def human_age(sec):
+    if sec is None: return "age unrecorded"
+    if sec < 90: return "%ds ago" % sec
+    if sec < 5400: return "%dm ago" % round(sec / 60)
+    if sec < 172800: return "%dh ago" % round(sec / 3600)
+    return "%dd ago" % round(sec / 86400)
+
+
+# ---------------------------------------------------------------------------------------
+# herdr, on any machine
+
+# One round trip per machine. Six `herdr pane read` calls over ssh is six round trips and a
+# tool nobody waits for, so the whole read is pushed to the far side and comes back as JSON.
+REMOTE_HERDR = r"""
+import json, subprocess, sys
+space = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
+def h(*a):
+    try: return json.loads(subprocess.run(["herdr", *a], capture_output=True, text=True, timeout=20).stdout)["result"]
+    except Exception: return {}
+ws = ["--workspace", space] if space else []
+panes = h("pane", "list", *ws).get("panes", [])
+tabs = {}
+for w in ([{"workspace_id": space}] if space else h("workspace", "list").get("workspaces", [])):
+    for t in h("tab", "list", "--workspace", str(w.get("workspace_id") or w.get("number"))).get("tabs", []):
+        tabs[t["tab_id"]] = t.get("label", "")
+out = []
+for p in panes:
+    tail = subprocess.run(["herdr", "pane", "read", p["pane_id"], "--lines", "8", "--format", "text"],
+                          capture_output=True, text=True, timeout=20).stdout
+    out.append({"pane": p["pane_id"], "tab_id": p.get("tab_id"),
+                "label": p.get("label") or tabs.get(p.get("tab_id"), ""),
+                "cwd": p.get("cwd"), "agent": p.get("agent"), "agent_status": p.get("agent_status"),
+                "session": (p.get("agent_session") or {}).get("value"), "tail": tail[-600:]})
+print(json.dumps({"space": space, "panes": out}))
+"""
+
+def herdr_local(space):
+    """The VPS. The agents user has no herdr server of its own, so root's is read through the
+    read-only `__fleet__` verb of the az-deliver forced command — the same key az-notify uses."""
+    try:
+        raw = json.loads(sh(["herdr", "pane", "list", "--workspace", str(space)]))["result"]["panes"]
+        tabs = {}
+        try:
+            for t in json.loads(sh(["herdr", "tab", "list", "--workspace", str(space)]))["result"]["tabs"]:
+                tabs[t["tab_id"]] = t.get("label", "")
+        except Exception: pass
+        return [{"pane": p["pane_id"], "label": tabs.get(p.get("tab_id"), ""), "cwd": p.get("cwd"),
+                 "agent": p.get("agent"), "agent_status": p.get("agent_status"), "session": None,
+                 "tail": sh(["herdr", "pane", "read", p["pane_id"], "--lines", "8", "--format", "text"])}
+                for p in raw], None
+    except Exception: pass
+    try:
+        r = subprocess.run(["ssh", "-i", os.path.expanduser("~/.ssh/id_ed25519"), "-o", "BatchMode=yes",
+                            "-o", "ConnectTimeout=8", "root@127.0.0.1", "__fleet__ %s" % space],
+                           capture_output=True, text=True, timeout=45)
+        return json.loads(r.stdout).get("panes", []), None
+    except Exception as e:
+        return [], "herdr unreachable: %s" % (str(e).split("\n")[0][:80] or "no answer")
+
+def herdr_ssh(target, space=None):
+    """A Mac over the tailnet. Returns (panes, error) — the error becomes a visible row."""
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                            "-o", "StrictHostKeyChecking=accept-new", target,
+                            "python3 - %s" % (space or "")],
+                           input=REMOTE_HERDR, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0 or not r.stdout.strip():
+            err = (r.stderr or "").strip().splitlines()
+            return [], (err[-1][:90] if err else "no answer over ssh")
+        return json.loads(r.stdout).get("panes", []), None
+    except Exception as e:
+        return [], str(e).split("\n")[0][:90]
+
+SHELL_PROMPT = re.compile(r"(?:[\$#%]|\u276f|\u279c)\s*$")
+
+def herdr_rows(panes, machine, space, az_pane, live):
+    """One row per pane, with the two judgements this tool is for.
+
+    herdr reports `agent: null / agent_status: unknown` for a pane it is not tracking an agent in.
+    That is not an unknowable state — it means the agent process is gone and a shell is left at the
+    prompt. Calling it `unknown` is how nine dead panes sat in this table for a day looking alive."""
+    rows = []
+    for p in panes:
+        pid = p["pane"]; text = p.get("tail") or ""
+        m = re.search(r"(\d+)% ctx", text); d = re.search(r"\$([0-9]+(?:\.[0-9]+)?)", text)
+        tok = re.search(r"tok (\d+)k", text)
+        status = p.get("agent_status"); agent = p.get("agent") or ""
+        evidence = ""
+        if not agent or status in (None, "", "unknown"):
+            status = "stale"
+            resume = re.search(r"--resume ([0-9a-f-]{36})", text)
+            if resume: evidence = "agent exited (resume %s)" % resume.group(1)[:8]
+            elif SHELL_PROMPT.search(text.rstrip()): evidence = "bare shell at the prompt"
+            else: evidence = "herdr tracks no agent here"
+        rows.append({"pane": pid, "substrate": "herdr", "machine": machine, "space": space,
+                     "label": p.get("label") or "", "title": p.get("label") or "",
+                     "role": "agent-zero" if pid == az_pane else (live.get(pid, {}).get("domain") or ""),
+                     "agent": agent, "status": status, "evidence": evidence,
+                     "ctx_pct": int(m.group(1)) if m else None,
+                     "usd": float(d.group(1)) if d else None,
+                     "tokens_k": int(tok.group(1)) if tok else None,
+                     "idle_s": None, "worktree": "",
+                     "state_in_manifest": live.get(pid, {}).get("status", ""), "cwd": p.get("cwd")})
+    return rows
+
+
+# ---------------------------------------------------------------------------------------
+# Orca
+
+ORCA_CLI_DEFAULT = "node /opt/orca-eval/orca/out/cli/index.js"
+
+def orca_json(cfg, *args):
+    cli = (cfg or {}).get("cli") or ORCA_CLI_DEFAULT
+    try:
+        out = subprocess.run(cli.split() + list(args) + ["--json"], capture_output=True, text=True, timeout=30).stdout
+        d = json.loads(out)
+        return d["result"] if d.get("ok") else {}
+    except Exception:
+        return {}
+
+def orca_status_from_title(title):
+    """Claude Code writes its own terminal title and prefixes a status glyph. herdr reads the same
+    glyphs to fill agent_status, so the two substrates agree on the vocabulary rather than
+    inventing a second one: the spinner frames mean a turn is running, the star means it is not."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    if t[0] in "◐◑◒◓⠋⠙⠹⠸":
+        return "working"
+    if t[0] in "✳✶✻✽*":
+        return "idle"
+    return None
+
+def orca_read(cfg, handle):
+    """The RENDERED screen. The default stream read stacks every repaint, so a TUI comes back as
+    `cclclecleaclear` and the statusline numbers are unparseable. Same read the herdr branch does
+    per pane, so both substrates report context and cost the same way."""
+    d = orca_json(cfg, "terminal", "read", "--terminal", handle, "--screen")
+    return "\n".join(((d.get("terminal") or {}).get("tail")) or [])
+
+def orca_panes(cfg, live_by_title):
+    """One row per live Orca terminal: what Shaan sees on the Agents tab, in the fleet table."""
+    ps = orca_json(cfg, "worktree", "ps")
+    tl = orca_json(cfg, "terminal", "list", "--include-visual-layouts")
+    if not tl:
+        return []
+    wt = {w.get("worktreeId"): w for w in (ps.get("worktrees") or [])}
+
+    # A tab holds a TREE of panes, not a list; and the TAB title is the stable one spawn-worker
+    # sets, because Claude Code overwrites the TERMINAL title with a summary of its own session.
+    tabname = {}
+    def leaves(node, out):
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "terminal":
+            out.append(node); return
+        for key in ("tabs", "children", "panes"):
+            v = node.get(key)
+            if isinstance(v, list):
+                for c in v: leaves(c, out)
+            elif isinstance(v, dict):
+                leaves(v, out)
+    for w in (tl.get("visualLayouts") or []):
+        for tab in ((w.get("root") or {}).get("tabs") or []):
+            got = []; leaves(tab.get("panes"), got)
+            for pane in got:
+                tabname[pane.get("handle")] = tab.get("title") or ""
+
+    rows = []
+    for t in (tl.get("terminals") or []):
+        h = t.get("handle"); w = wt.get(t.get("worktreeId")) or {}
+        label = tabname.get(h) or t.get("title") or ""
+        # ORCA CAN RETURN title: null FOR EVERY TERMINAL. Seen 2026-09-12 05:5x: all three tabs lost
+        # their titles at once, az-send's `orca:<domain> · <id>` addressing stopped resolving, and this
+        # table drew blank names for two live owners on the surface Shaan reads. `orca terminal rename`
+        # restored them, but nothing explains the loss -- so never LABEL by title alone. agentIdentity,
+        # worktreePath and the handle all still populate, and the handle is the address anyway.
+        has_title = bool(label.strip())
+        short = (h or "")[5:13]
+        if not has_title:
+            ident = (t.get("agentIdentity") or "").strip()
+            label = (ident + " " + short).strip() if ident else ("shell " + short).strip()
+        # the list preview is only the last few lines and usually misses the statusline
+        text = orca_read(cfg, h) or t.get("preview") or ""
+        m = re.search(r"(\d+)% ctx", text); d = re.search(r"\$([0-9]+(?:\.[0-9]+)?)", text)
+        tok = re.search(r"tok (\d+)k", text)
+        # the hook-fed agent list is authoritative when Orca has one; the title glyph is the fallback
+        agents = [a for a in (w.get("agents") or []) if a.get("terminalHandle") in (None, h)]
+        status = (agents[0].get("status") if agents else None) or orca_status_from_title(t.get("title"))
+        # match the manifest by label first, then by handle: an untitled row must still find its
+        # domain, and team.yaml carries the handle as `terminal:`.
+        meta = (live_by_title.get(label.strip().lower())
+                or live_by_title.get((h or "").strip().lower())
+                or live_by_title.get(short.lower()) or {})
+        last = t.get("lastOutputAt") or 0
+        # Orca is the one substrate that timestamps a terminal, so it is the one that can age a
+        # dead row honestly. A disconnected or orphaned pty is not an agent any more.
+        if t.get("orphaned") or t.get("connected") is False:
+            status = "stale"
+        elif not status and not orca_status_from_title(t.get("title")) and "% ctx" not in text:
+            # no hook agent, no status glyph, no statusline: this is a plain shell someone opened,
+            # not an agent whose state we failed to read. Say which.
+            status = "shell (no agent)"
+        rows.append({"pane": h, "substrate": "orca", "machine": "siso-vps",
+                     "last_output_ms": last or None, "idle_s": _age_s(last),
+                     "label": label, "title": t.get("title") or "", "short_handle": short,
+                     "has_title": has_title,
+                     "role": meta.get("domain") or "", "agent": (agents[0].get("agent") if agents else "") or ("claude" if re.search(r"bypass permissions|Claude Code|% ctx", text) else ""),
+                     "status": status, "ctx_pct": int(m.group(1)) if m else None,
+                     "usd": float(d.group(1)) if d else None, "tokens_k": int(tok.group(1)) if tok else None,
+                     "state_in_manifest": meta.get("status", ""), "cwd": t.get("worktreePath"),
+                     "worktree": (w.get("displayName") or t.get("branch") or ""), "connected": t.get("connected")})
+    return rows
+
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--team-dir", required=True); ap.add_argument("--json")
+    a = ap.parse_args(); T = a.team_dir
+    y = yaml.safe_load(open(os.path.join(T, "team.yaml")))
+    hcfg = y.get("herdr") or {}
+    space = hcfg.get("space"); az = hcfg.get("agent_zero_pane")
+    checkout = (y.get("project") or {}).get("checkout") or ""; branch = (y.get("project") or {}).get("branch") or "main"
+    releases = (y.get("project") or {}).get("releases") or ""; handoffs = os.path.join(T, "handoffs")
+    today = datetime.date.today()
+    live = {o.get("pane"): o for o in ((y.get("owners") or {}).get("live_today") or []) if o.get("pane")}
+
+    panes = []; unreachable = []
+
+    # ---- herdr, one entry per machine ---------------------------------------------------
+    # Declared in team.yaml `herdr.machines`. The default, for a team that never declared any,
+    # is the one local machine — the old behaviour, so nothing regresses by omission.
+    machines = hcfg.get("machines") or [{"id": (y.get("host") or {}).get("name") or "local",
+                                         "local": True, "space": space}]
+    for mc in machines:
+        mid = mc.get("id") or "?"; msp = mc.get("space", space if mc.get("local") else None)
+        if mc.get("skip"):
+            unreachable.append({"machine": mid, "substrate": "herdr", "why": mc.get("skip")}); continue
+        if mc.get("local"):
+            got, err = herdr_local(msp)
+        else:
+            got, err = herdr_ssh(mc.get("ssh") or mc.get("target") or "", msp)
+        if err:
+            unreachable.append({"machine": mid, "substrate": "herdr", "why": err}); continue
+        panes.extend(herdr_rows(got, mid, msp, az, live))
+
+    # ---- Orca terminals — the same fleet, the other substrate ---------------------------
+    orca_cfg = y.get("orca") or {}
+    if str(y.get("substrate") or "").strip() == "orca" or orca_cfg.get("runtime"):
+        by_title = {}
+        for o in ((y.get("owners") or {}).get("live_today") or []):
+            for k in (o.get("title"), o.get("terminal"), o.get("domain")):
+                if k: by_title[str(k).strip().lower()] = o
+        try:
+            orows = orca_panes(orca_cfg, by_title)
+        except Exception as e:
+            orows = []; unreachable.append({"machine": (y.get("host") or {}).get("name") or "local",
+                                            "substrate": "orca", "why": str(e)[:90]})
+        have = {p["pane"] for p in panes}
+        panes.extend([r for r in orows if r["pane"] not in have])
+
+    # ---- who is Agent Zero ---------------------------------------------------------------
+    # He has an address on whichever substrate he is on, and `NONE` was only ever true of the
+    # herdr pane he vacated. az-target is the file every owner already routes by, so it is the
+    # authority here too; team.yaml is the fallback.
+    azc = y.get("agent_zero") or {}
+    az_addr = ""
+    tf = azc.get("target_file")
+    if tf and os.path.exists(tf):
+        for line in open(tf, errors="ignore"):
+            line = line.strip()
+            if line and not line.startswith("#"): az_addr = line; break
+    az_addr = az_addr or str(azc.get("terminal") or "") or (az or "")
+    az_row = None
+    for p in panes:
+        if az_addr and (p["pane"] == az_addr or p.get("label", "").strip().lower() == az_addr.replace("orca:", "").strip().lower()):
+            p["role"] = "agent-zero"; az_row = p
+    az_shown = "NONE"
+    if az_row:
+        az_shown = "%s (%s, %s%s)" % (az_row["pane"][:18], az_row["substrate"],
+                                      az_row.get("status") or "?",
+                                      ", %d%% ctx" % az_row["ctx_pct"] if az_row.get("ctx_pct") else "")
+    elif az_addr:
+        az_shown = "%s — NOT IN THE FLEET (address stale)" % az_addr[:24]
+
+    # ---- three numbers --------------------------------------------------------------------
+    commits = 0
+    if checkout and os.path.isdir(checkout):
+        out = sh(["git", "log", "--since=midnight", "--oneline", branch], cwd=checkout); commits = len([l for l in out.splitlines() if l.strip()])
+    deploys = len([r for r in os.listdir(releases) if r.startswith(today.strftime("%Y%m%d"))]) if releases and os.path.isdir(releases) else 0
+    hand = [f for f in glob.glob(os.path.join(handoffs, "HANDOFF-*.md")) if datetime.date.fromtimestamp(os.path.getmtime(f)) == today]
+    total_ctx = sum(p.get("tokens_k") or 0 for p in panes); total_usd = sum(p.get("usd") or 0 for p in panes)
+    stale = [p for p in panes if p.get("status") == "stale"]
+    res = {"team": y.get("team"), "at": datetime.datetime.now().isoformat(timespec="minutes"), "space": space,
+           "agent_zero_pane": az, "agent_zero": {"address": az_addr, "found": bool(az_row),
+                                                 "substrate": az_row["substrate"] if az_row else None,
+                                                 "status": az_row.get("status") if az_row else None},
+           "three": {"commits_on_trunk_today": commits, "deploys_today": deploys, "handoffs_today": len(hand)},
+           "substrate": y.get("substrate") or "herdr", "orca_worktree": orca_cfg.get("worktree"),
+           "machines": [m.get("id") for m in machines], "unreachable": unreachable,
+           "stale_count": len(stale), "live_count": len(panes) - len(stale),
+           "resident_context_k": total_ctx, "resident_usd": round(total_usd, 2), "panes": panes}
+    if a.json:
+        json.dump(res, open(a.json, "w"), indent=1)
+
+    print("%s · %s · Agent Zero %s" % (res["team"], res["at"], az_shown))
+    print("three numbers today: commits on trunk %d · deploys %d · handoffs %d" % (commits, deploys, len(hand)))
+    print("fleet: %d live · %d stale · across %s" % (res["live_count"], len(stale), ", ".join(res["machines"]) or "-"))
+    print("resident context: %dk tokens across %d panes · $%.2f shown" % (total_ctx, len(panes), total_usd))
+    cols = ("machine", "substrate", "pane", "role", "agent", "status", "ctx%", "$", "worktree")
+    print("| " + " | ".join(cols) + " |"); print("|" + "---|" * len(cols))
+    for p in sorted(panes, key=lambda r: (r.get("machine") or "", r.get("substrate") or "", r["pane"])):
+        st = p.get("status") or "?"
+        if st == "stale":
+            st = "stale (%s%s)" % (human_age(p.get("idle_s")), "; " + p["evidence"] if p.get("evidence") else "")
+        print("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            p.get("machine") or "?", p.get("substrate", "herdr"), p["pane"][:20],
+            p.get("role") or p.get("label") or "", p.get("agent") or "", st,
+            p["ctx_pct"] if p.get("ctx_pct") is not None else "?",
+            p["usd"] if p.get("usd") is not None else "?", (p.get("worktree") or "")[:22]))
+    for u in unreachable:
+        why = u["why"] if len(u["why"]) <= 88 else u["why"][:85].rstrip() + "…"
+        print("| %s | %s | — | — | — | UNREACHABLE: %s | — | — | — |" % (u["machine"], u["substrate"], why))
+    if any(len(u["why"]) > 88 for u in unreachable):
+        print("(full reasons in the JSON `unreachable` list)")
+
+if __name__ == "__main__":
+    main()

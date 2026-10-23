@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""intent-capture — every word Shaan said to an Agent Zero, verbatim, one file each.
+
+  intent-capture --team siso-internal-labs SOURCE...            (SOURCE = Claude Code transcript .jsonl, a
+                                                    directory of them, or a FROM-SHAAN-*.md relay)
+  intent-capture --team siso-internal-labs --index               rebuild teams/labs/intent/index.html only
+
+Writes teams/<team>/intent/<YYYYMMDD-HHMM>-<id8>.md (and teams/<team>/shaan-intent-log.json) with frontmatter (when, session, cwd,
+source, words) and the verbatim text. Idempotent: an entry that already exists is skipped.
+Owner relays ("[VPS] …"), system reminders, slash-command expansions and tool results are
+not his words and are not captured; they are counted and reported.
+
+Why: "every single word I've said to the agent zero is viewable and any future agent can go
+through it to see what we missed from it" — Shaan, 2026-09-11.
+"""
+import argparse, glob, html, json, os, re, sys, datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return None
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return None
+
+def is_padding(t):
+    """A context-stress test ("reply with just OK" + 400k x's) is not intent."""
+    w = t.split()
+    if len(w) < 1000:
+        return False
+    top = max(w.count(x) for x in set(w[:2000]))
+    return top / min(len(w), 2000) > 0.8
+
+# "[Image #n] …" IS him typing (a screenshot plus his words) and a "⏺ …" paste is his reply quoting
+# the agent back — both are kept; the paste is flagged in the frontmatter, never dropped.
+SKIP_PREFIX = ("<", "[VPS]", "Caveat:", "[Request interrupted",
+               "Another Claude session", "Agent Zero —", "Agent Zero -", "FROM SHAAN",
+               "You are Agent Zero", "Base directory for this skill",
+               "This session is being continued", "Launching skill")
+# Relay/brief bodies that do not start with a prefix above (a teammate paste, a brief
+# quoting the human back at him). These are not the human typing; they are machinery.
+SKIP_CONTAINS = ("<teammate-message", "<cross-session-message", "idle_notification",
+                 "Claude-Session:", "This is how Claude Code surfaces")
+
+def entries_from_jsonl(path, stats):
+    for line in open(path, errors="ignore"):
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if o.get("type") != "user" or o.get("isMeta"):
+            continue
+        t = text_of(o.get("message", {}).get("content"))
+        if t is None:
+            stats["tool_results"] += 1; continue
+        t = t.strip()
+        if not t:
+            continue
+        if t.startswith(SKIP_PREFIX) or any(k in t for k in SKIP_CONTAINS):
+            stats["relays_or_system"] += 1; continue
+        if is_padding(t):
+            stats["padding_tests"] += 1; continue
+        ts = o.get("timestamp") or ""
+        try:
+            when = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
+        yield {
+            "id": (o.get("uuid") or "")[:8] or "%08x" % (hash(t) & 0xffffffff),
+            "when": when, "session": (o.get("sessionId") or os.path.basename(path).split(".")[0])[:8],
+            "cwd": o.get("cwd", ""), "source": path, "text": t,
+        }
+
+def entries_from_relay(path, stats):
+    t = open(path, errors="ignore").read().strip()
+    if not t:
+        return
+    when = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
+    yield {"id": "relay-" + re.sub(r"[^A-Za-z0-9]+", "-", os.path.basename(path))[:24],
+           "when": when, "session": "relay", "cwd": "", "source": path, "text": t}
+
+def write_entry(outdir, e):
+    name = "%s-%s.md" % (e["when"].strftime("%Y%m%d-%H%M"), e["id"])
+    p = os.path.join(outdir, name)
+    if os.path.exists(p):
+        return False
+    words = len(e["text"].split())
+    pasted = "pasted_reply: true\n" if e["text"].startswith("⏺") else ""
+    with open(p, "w") as f:
+        f.write("---\nwhen: %s\nsession: %s\ncwd: %s\nsource: %s\nwords: %d\n%s---\n\n%s\n" % (
+            e["when"].isoformat(), e["session"], e["cwd"], e["source"], words, pasted, e["text"]))
+    return True
+
+def read_entry(p):
+    s = open(p, errors="ignore").read()
+    m = re.match(r"---\n(.*?)\n---\n\n?(.*)\Z", s, re.S)
+    meta = dict(l.split(": ", 1) for l in m.group(1).splitlines() if ": " in l) if m else {}
+    return meta, (m.group(2) if m else s)
+
+def build_index(team, outdir):
+    files = sorted(glob.glob(os.path.join(outdir, "*.md")), reverse=True)
+    rows, total = [], 0
+    for p in files:
+        meta, body = read_entry(p)
+        words = int(meta.get("words", len(body.split()))); total += words
+        rows.append((meta.get("when", "")[:16].replace("T", " "), meta.get("session", ""), words, os.path.basename(p), body))
+    css = ("body{margin:0;padding:28px 20px 60px;max-width:900px;margin-inline:auto;font:15px/1.5 -apple-system,Inter,system-ui,sans-serif;color:#1a1a1a;background:#faf9f7}"
+           "h1{font-size:24px;margin:0 0 4px}.sub{color:#6b6b6b;margin-bottom:20px}article{background:#fff;border:1px solid #e2e0dc;border-radius:10px;padding:14px 16px;margin:12px 0}"
+           "article h2{font-size:13px;color:#6b6b6b;font-weight:600;margin:0 0 8px}pre{white-space:pre-wrap;font:inherit;margin:0}"
+           "@media(prefers-color-scheme:dark){body{background:#11131a;color:#e6e6e6}article{background:#181b23;border-color:#2a2d36}}")
+    out = ["<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+           "<title>Intent — %s</title><style>%s</style></head><body>" % (html.escape(team), css),
+           "<h1>What Shaan said — %s</h1><div class='sub'>%d entries · %s words · verbatim, newest first · generated by bin/intent-capture</div>" % (html.escape(team), len(rows), "{:,}".format(total))]
+    for when, sess, words, name, body in rows:
+        out.append("<article id='%s'><h2>%s · session %s · %d words · <a href='%s'>%s</a></h2><pre>%s</pre></article>" % (
+            html.escape(name[:-3]), html.escape(when), html.escape(sess), words, html.escape(name), html.escape(name), html.escape(body)))
+    out.append("</body></html>")
+    with open(os.path.join(outdir, "index.html"), "w") as f:
+        f.write("\n".join(out))
+    # compat: the flat JSON the skills quote from (oldest first)
+    flat = [{"ts": w, "session": s_, "prompt": b} for (w, s_, _, _, b) in reversed(rows)]
+    with open(os.path.join(os.path.dirname(outdir), "shaan-intent-log.json"), "w") as f:
+        json.dump(flat, f, indent=1)
+    return len(rows), total
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--team", required=True)
+    ap.add_argument("--index", action="store_true", help="rebuild the index only")
+    ap.add_argument("--dest", help="intent dir to write (default teams/<team>/intent here; a companion repo uses <repo>/intent)")
+    ap.add_argument("sources", nargs="*")
+    a = ap.parse_args()
+    outdir = a.dest or os.path.join(ROOT, "teams", a.team, "intent")
+    os.makedirs(outdir, exist_ok=True)
+    stats = {"captured": 0, "skipped_existing": 0, "relays_or_system": 0, "tool_results": 0, "padding_tests": 0}
+    if not a.index:
+        paths = []
+        for s in a.sources:
+            paths += sorted(glob.glob(os.path.join(s, "*.jsonl"))) if os.path.isdir(s) else [s]
+        for p in paths:
+            gen = entries_from_jsonl(p, stats) if p.endswith(".jsonl") else entries_from_relay(p, stats)
+            for e in gen:
+                if write_entry(outdir, e): stats["captured"] += 1
+                else: stats["skipped_existing"] += 1
+    n, total = build_index(a.team, outdir)
+    print("intent-capture team=%s captured=%d existing=%d not-his-words=%d padding=%d tool-results=%d | index: %d entries, %d words -> %s" % (
+        a.team, stats["captured"], stats["skipped_existing"], stats["relays_or_system"], stats["padding_tests"], stats["tool_results"], n, total, os.path.join(outdir, "index.html")))
+
+if __name__ == "__main__":
+    main()

@@ -10,6 +10,7 @@
 # the host in tmux (ssh -t mini-fast tmux attach -t ab-owners) and mirrors it into the app here; no herdr tab. It refuses, and
 # says why, when that machine has no Claude login or no copy of DIR.
 set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 on="${A0_ON:-}"
 if [ "${1:-}" = "--on" ]; then on="${2:?machine}"; shift 2; fi
 name="${1:?name}"; dir="${2:?folder}"; brief="${3:?brief file}"
@@ -23,5 +24,5 @@ pane=$(herdr tab create --workspace "$ws" --cwd "$dir" --label "$name" | python3
 host="$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
 # A0_CONFIG_DIR picks the Claude login, default fuzeheritage's ~/.claude-siso (Shaan, 8 Oct ~08:45: "same with any other agents that
 # you spawn up, very important"); lordsisodia's ~/.config/claude-siso-3 is the reserve.
-herdr pane run "$pane" "CLAUDE_CONFIG_DIR=${A0_CONFIG_DIR:-\$HOME/.claude-siso} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=\${A0_COMPACT_PCT:-40} $host --keep-herdr-env --permission-mode bypassPermissions --name '$name' --model 'claude-opus-5-5[1m]' --prompt 'Read $brief and start: you are $name.'"
+herdr pane run "$pane" "CLAUDE_CONFIG_DIR=${A0_CONFIG_DIR:-\$HOME/.claude-siso} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=\${A0_COMPACT_PCT:-40} $host --keep-herdr-env --permission-mode bypassPermissions --name '$name' --model 'claude-opus-5-5[1m]' --prompt 'Read $ROOT/souls/OWNER.md and $brief and start: you are $name. After finishing a task with nothing running, queued, in background or waiting for Shaan, write your seat HANDOFF and memory; seat-fresh is your last action. A fresh boot with no new task stays idle.'"
 echo "$name starting in pane $pane ($dir)"

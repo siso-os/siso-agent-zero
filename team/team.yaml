@@ -1,0 +1,123 @@
+# team.yaml — one per project team. This is the schema AND the first real instance.
+# Copy to teams/<slug>/team.yaml when instantiating; keep this one as the reference.
+
+template: {repo: sisodias/siso-project-team, version: v0.2.0}   # tools/team-upgrade shows what changed since
+team: siso-internal-labs
+human: shaan
+created: 2026-09-11
+
+project:
+  repo: https://github.com/sisodias/siso-internal-labs        # the app being built
+  checkout: /opt/siso-internal-labs                           # ONE shared clone; the git index is shared
+  branch: siso/main
+  site: https://sisolabs.space
+  docs: https://sisolabs.space/docs/                          # everything the human reads, with a picture
+  docs_path: /opt/siso-hub/docs/
+  deploy_script: /opt/siso-deploy.sh                          # the ONLY thing that moves pointers
+  deploy_targets: [current, dev]                               # production, shared preview
+  releases: /opt/siso-web-releases
+
+host:
+  name: siso-vps
+  ssh: root@13.140.182.104                                     # alias `siso-vps`
+  agents_run_as: siso
+  ram_gb: 7.9                                                  # 16 GB planned; nine resident CLIs + OpenWA do not fit in 8
+  other_machines:                                              # on the health page and in the token rollup
+    - {id: compute-pool, target: ubuntu@51.81.202.7, key: ovh-compute-pool-ed25519, role: arms host}
+    - {id: mac-mini,     target: shaansisodia@100.66.34.21}
+    - {id: macbook,      target: shaansisodia@100.118.29.68}
+    - {id: bykonz-yard,  target: root@169.58.216.116}
+    - {id: hetzner-oracle, target: root@77.42.66.40, access: "SSH key not authorised — Hetzner console needed"}
+
+herdr:
+  space: w1                                                    # the team's workspace on the host
+  agent_zero_pane: null                                        # TODO tools/new-team.sh sets this; today AZ has NO pane (laptop resume)
+  ui: https://sisolabs.space/siso-crm/herdr                    # rail; ttyd at /herdr-tty/<machine>/ behind the login
+  send: tools/az-send                                          # never raw pane send-text/send-keys
+
+# SUBSTRATE — where this team's agents actually run.
+#   herdr   panes in root's herdr server. Still the substrate on the laptop and the Mac Mini.
+#   orca    Orca terminals on the VPS. Shaan opens /siso-crm/agents and sees them with live
+#           status, which is the whole point (LABS-23, 2026-09-12).
+# Both are addressable by tools/az-send; a target that starts `term_` or `orca:` picks Orca.
+substrate: orca
+
+orca:
+  runtime: ws://127.0.0.1:7777          # orcad, served to the app as /orca-rpc/; pid in ~siso/.orca/orca-runtime.json
+  repo_id: 01785037-f92c-466b-9e39-50cf9ca30cf9   # `orca repo list --json`
+  worktree: branch:siso/main            # the shared checkout every owner uses — NOT a per-owner lane
+  cli: node /opt/orca-eval/orca/out/cli/index.js  # wrapped as /usr/local/bin/orca for the agents user
+  runs_as: siso                         # orcad already runs as the agents user; no setpriv, no root
+  ui: https://sisolabs.space/siso-crm/agents
+  agent_status_hooks: claude            # `orca agent hooks status` must say installed, see the note in skills/owner
+
+tasks:
+  system: plane
+  workspace: siso-crm
+  project_id: null                                             # TODO fill from `plane` CLI; 18 projects exist
+  base_url_on_host: http://127.0.0.1:80
+
+agent_zero:
+  skill: skills/project-agent-zero
+  state_file: /opt/siso-agent-zero/AGENT-ZERO-STATE.md
+  compact_prompt: skills/project-agent-zero/COMPACT.md
+  briefs_dir: /opt/siso-agent-zero                             # TASK-LABS-*.md
+  handoffs_dir: /opt/siso-agent-zero/work                      # HANDOFF-*.md
+  charter: teams/siso-internal-labs/AGENT-ZERO.md              # specifics + domains table
+  intent: teams/siso-internal-labs/intent/                     # one verbatim file per message; tools/intent-capture on the laptop
+  intent_log: teams/siso-internal-labs/shaan-intent-log.json   # flat compat view, written by the same tool
+  reports_to_human_via: console                                # `console` skill; cards, not walls
+  reports_to_personal_agent_zero: teams/siso-internal-labs/DIGEST.md   # tier 0 (siso-agent-zero-protocol) reads only this
+  harness: claude                                              # Opus on Claude Code
+
+owners:
+  model: opus
+  harness: claude                                              # Claude Code — "they're the best in it"
+  spawn: tools/spawn-worker --harness claude
+  lifecycle: ephemeral                                         # brief → done-check → handoff → exit
+  context_budget_tokens: 60000                                 # today: 235k–692k each, resident 15h, $591/day
+  skill: skills/owner
+  live_today:                                                  # 2026-09-11 13:20 — to be closed as handoffs land
+    - {domain: tokens,   pane: w1:p5, status: done, handoff: HANDOFF-LABS-6.md}
+    - {domain: herdr,    pane: w1:p6, status: working, item: fleet rail registration of compute-pool}
+    - {domain: plane,    pane: w1:p7, status: done}
+    - {domain: health+contact, pane: w1:p8, status: done, handoff: HANDOFF-LABS-9-13.md}
+    - {domain: orca,     pane: w1:pB, status: idle}
+    - {domain: perf,     pane: w1:pC, status: idle}
+    - {domain: life,     pane: w1:pD, status: working, item: Convex extract + backup, then Postgres}
+    - {domain: archaeology, pane: w1:pE, status: idle}
+    - {domain: compute,  pane: w1:pJ, status: working, item: memory-aware build slot}
+
+arms:
+  contract: skills/worker-contract
+  pools:
+    - {name: qwen, model: qwen3.8-27b, harness: codex, endpoint_check: "tools/pool-env --check on compute-pool", workers: 16, status: "not serving since 10:17Z — loop timer disabled 23:43Z, awaiting human"}
+    - {name: luna, model: gpt (Codex plan), harness: codex, when: "Codex plan active"}
+  fallback: owner's own sub-agents — and the handoff says so
+  spawn: tools/spawn-worker --harness codex --model qwen|luna  # herdr panes in the Codex harness; they message back with az-send
+  codex_provider: codex/config.pool.toml                       # [model_providers.siso-pool]; SISO_POOL_KEY from the environment
+  today: "Codex 0.153.4 is on the laptop, NOT on the VPS — build item 3"
+
+browser:
+  tool: tools/siso-browse
+  login: /opt/orca-eval/verifier.env                           # mode 600, siso only; never the human's cookie
+  storage_state: /opt/siso-browse/state.json                   # persisted session; created on first run
+  today: "53 ad-hoc scripts in /tmp/pw — delete after siso-browse lands"
+
+verify:                                                      # from Oracle: one gate, a ratchet, one human gate
+  command: TODO                                              # the one command that judges a landing (JSON per layer, exit 0/1/2, PARTIAL 3)
+  baseline: TODO                                             # committed red baseline from a clean main; the gate refuses NEW red only
+  sensitive_paths: [credentials, tokens, deploy scripts, schema, wipe paths]   # the only diffs that get a cold review
+  human_gate: HUMAN-GATE.md                                  # the public live window and anything else only Shaan touches
+
+trunk:
+  max_live_lanes: 3                                          # owners' worktrees; refuse a 4th
+  worktree_root: .worktrees                                  # under the code repo; gitignored
+  delete_on_merge: true                                      # Agent Zero removes the lane when the handoff lands
+
+front_end: https://siso-project-team.pages.dev/               # tools/publish-front after any docs/ change
+
+human_only:                                                    # the ONLY things that may wait on Shaan
+  - credentials
+  - money
+  - production data

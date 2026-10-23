@@ -1,0 +1,11 @@
+{
+  "id": "siso.agents.work",
+  "kind": "tool",
+  "summary": "The task schema and kit: task list, agent ownership and proof-of-landing for any repo",
+  "owner": "agent-zero",
+  "tags": [
+    "layer:agents"
+  ],
+  "depends": [],
+  "status": "active"
+}

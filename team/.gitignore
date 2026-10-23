@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+# never: keys, cookies, browser profiles
+*.env
+credentials/
+state.json
+storage-state*.json

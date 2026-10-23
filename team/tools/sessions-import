@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""sessions-import — copy agent conversation history (Claude Code .jsonl transcripts) into a team
+repo, redacting secrets, with a manifest. "Everything needs to be in the repo, conversation
+history, my words, everything, all linked together" — Shaan, 2026-09-11.
+
+  sessions-import --dest <team-repo>/sessions/<lane> SOURCE_DIR_OR_FILE...
+
+Redacts: OpenAI/Anthropic/Bifrost-style keys (sk-…), GitHub tokens (gh[pousr]_…), private key
+blocks, JWT-looking strings, and any KEY/TOKEN/SECRET/PASSWORD=value pair. Writes
+<dest>/MANIFEST.md (file · bytes · lines · first/last timestamp · redactions). Idempotent:
+a file whose redacted bytes are unchanged is skipped. Never edits the source.
+"""
+import argparse, glob, hashlib, json, os, re, sys
+
+PATTERNS = [
+    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "sk-[REDACTED]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh_[REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}"), "[REDACTED JWT]"),
+    (re.compile(r"((?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|_KEY)\s*[=:]\s*[\"']?)([^\s\"'\\,;]{8,})", re.I), r"\1[REDACTED]"),
+]
+
+def redact(text):
+    n = 0
+    for rx, rep in PATTERNS:
+        text, k = rx.subn(rep, text); n += k
+    return text, n
+
+def stamps(path):
+    first = last = ""
+    for line in open(path, errors="ignore"):
+        m = re.search(r'"timestamp":"([^"]+)"', line)
+        if m:
+            first = first or m.group(1); last = m.group(1)
+    return first[:19], last[:19]
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--dest", required=True); ap.add_argument("sources", nargs="+")
+    a = ap.parse_args(); os.makedirs(a.dest, exist_ok=True)
+    rows, total_red, copied, skipped = [], 0, 0, 0
+    paths = []
+    for s in a.sources:
+        paths += sorted(glob.glob(os.path.join(s, "*.jsonl"))) if os.path.isdir(s) else [s]
+    for p in paths:
+        raw = open(p, errors="ignore").read()
+        out, n = redact(raw); total_red += n
+        dst = os.path.join(a.dest, os.path.basename(p))
+        digest = hashlib.sha256(out.encode()).hexdigest()[:12]
+        if os.path.exists(dst) and hashlib.sha256(open(dst, "rb").read()).hexdigest()[:12] == digest:
+            skipped += 1
+        else:
+            open(dst, "w").write(out); copied += 1
+        f, l = stamps(dst)
+        rows.append((os.path.basename(p), len(out.encode()), out.count("\n"), f, l, n, digest))
+    with open(os.path.join(a.dest, "MANIFEST.md"), "w") as m:
+        m.write("# Sessions manifest — %s\n\nRedacted copies of agent transcripts; the originals stay on the machine that made them.\n\n" % a.dest)
+        m.write("| file | bytes | lines | first | last | redactions | sha12 |\n|---|---|---|---|---|---|---|\n")
+        for r in sorted(rows, key=lambda r: r[3]):
+            m.write("| %s | %d | %d | %s | %s | %d | %s |\n" % r)
+    print("sessions-import dest=%s files=%d copied=%d unchanged=%d redactions=%d" % (a.dest, len(rows), copied, skipped, total_red))
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""render-front — one team's page, generated from what is true (team.yaml, the intent ledger,
+handoffs, ledgers, fleet-status.json), never written by hand.
+
+  render-front --team-dir <companion repo> [--out <companion>/index.html]
+
+Private by construction: it lives in the companion repo and is served only behind the site's login.
+"""
+import argparse, datetime, glob, html, json, os, re, sys
+try: import yaml
+except ImportError: sys.exit("render-front: python3-yaml is required")
+
+CSS = """:root{--bg:#faf9f7;--fg:#1a1a1a;--muted:#6b6b6b;--line:#e2e0dc;--card:#fff;--code:#f3f1ee;--brain:#7a5cff;--owner:#0f766e;--arm:#b45309}
+@media(prefers-color-scheme:dark){:root{--bg:#11131a;--fg:#e6e6e6;--muted:#9a9aa3;--line:#2a2d36;--card:#181b23;--code:#1f2230}}
+body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Inter,system-ui,sans-serif;max-width:1040px;margin-inline:auto}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:30px 0 10px;padding-top:12px;border-top:1px solid var(--line)}.sub{color:var(--muted);margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h3{margin:0 0 6px;font-size:14px;color:var(--muted);font-weight:600}.big{font-size:30px;font-weight:700}
+code{font:13px ui-monospace,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+a{color:inherit}.k{display:inline-block;font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px;color:#fff;margin-right:6px}.brain{background:var(--brain)}.owner{background:var(--owner)}
+pre{white-space:pre-wrap;font:13px/1.45 ui-monospace,Menlo,monospace;background:var(--code);padding:10px 12px;border-radius:6px}"""
+
+def read_entry(p):
+    s = open(p, errors="ignore").read(); m = re.match(r"---\n(.*?)\n---\n\n?(.*)\Z", s, re.S)
+    meta = dict(l.split(": ", 1) for l in m.group(1).splitlines() if ": " in l) if m else {}
+    return meta, (m.group(2) if m else s)
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--team-dir", required=True); ap.add_argument("--out")
+    a = ap.parse_args(); T = a.team_dir; out = a.out or os.path.join(T, "index.html")
+    y = yaml.safe_load(open(os.path.join(T, "team.yaml"))); e = html.escape
+    fs = json.load(open(os.path.join(T, "fleet-status.json"))) if os.path.exists(os.path.join(T, "fleet-status.json")) else {}
+    label = y.get("label") or y.get("team"); tpl = y.get("template") or {}
+    proj = y.get("project") or {}; herdr = y.get("herdr") or {}; tasks = y.get("tasks") or {}
+    intents = sorted(glob.glob(os.path.join(T, "intent", "*.md")), reverse=True)
+    hand = sorted(glob.glob(os.path.join(T, "handoffs", "HANDOFF-*.md")), key=os.path.getmtime, reverse=True)
+    briefs = sorted(glob.glob(os.path.join(T, "briefs", "*.md")))
+    digest = open(os.path.join(T, "DIGEST.md")).read().strip().splitlines()[-6:] if os.path.exists(os.path.join(T, "DIGEST.md")) else []
+    three = fs.get("three", {})
+    H = ["<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+         "<title>%s — team</title><style>%s</style></head><body>" % (e(label), CSS),
+         "<h1>%s — the team</h1><div class='sub'>Generated %s by tools/render-front from team.yaml, the intent ledger, handoffs and fleet-status.json. Template %s %s. Private: served only behind the login.</div>" % (
+             e(label), datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), e(str(tpl.get("repo", ""))), e(str(tpl.get("version", ""))))]
+    H.append("<div class='grid'>")
+    for k, v in (("commits on trunk today", three.get("commits_on_trunk_today")), ("deploys today", three.get("deploys_today")), ("handoffs today", three.get("handoffs_today")),
+                 ("resident context", ("%dk" % fs["resident_context_k"]) if fs.get("resident_context_k") is not None else None)):
+        H.append("<div class='card'><h3>%s</h3><div class='big'>%s</div></div>" % (e(k), e(str(v)) if v is not None else "—"))
+    H.append("</div>")
+    links = [("Plane project", "%s/%s/projects/" % (proj.get("site", ""), tasks.get("workspace", ""))), ("Agents rail", herdr.get("ui", "")),
+             ("front end (template)", y.get("front_end", "")), ("code repo", proj.get("repo", "")), ("docs Shaan reads", proj.get("docs", ""))]
+    H.append("<h2>Where</h2><table>" + "".join("<tr><th>%s</th><td><a href='%s'>%s</a></td></tr>" % (e(k), e(str(v)), e(str(v))) for k, v in links if v) +
+             "<tr><th>host</th><td>%s · space <code>%s</code> · Agent Zero pane <code>%s</code></td></tr></table>" % (e(str((y.get("host") or {}).get("name"))), e(str(herdr.get("space"))), e(str(herdr.get("agent_zero_pane")))))
+    # The fleet is not one machine, so the table says which one every row is on, and a machine
+    # that could not be read gets a row of its own rather than being absent (LABS-29).
+    az = fs.get("agent_zero") or {}
+    H.append("<h2>Fleet <span class='sub'>%s · %d live · %d stale · Agent Zero %s</span></h2>" % (
+        e(" + ".join(fs.get("machines") or [])), fs.get("live_count", 0), fs.get("stale_count", 0),
+        e("%s on %s" % (str(az.get("address"))[:18], az.get("substrate")) if az.get("found") else "NOT FOUND")))
+    H.append("<table><tr><th>machine</th><th>substrate</th><th>pane</th><th>role</th><th>agent</th><th>status</th><th>ctx %</th><th>$</th><th>worktree</th></tr>")
+    for p in sorted(fs.get("panes", []), key=lambda r: (r.get("machine") or "", r.get("substrate") or "", r.get("pane") or "")):
+        st = p.get("status") or "?"
+        if st == "stale":
+            st = "stale — %s" % (p.get("evidence") or "no agent")
+        H.append("<tr><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            e(p.get("machine") or "?"), e(p.get("substrate") or "herdr"), e(p["pane"][:22]),
+            "<span class='k brain'>AZ</span>" if p.get("role") == "agent-zero" else ("<span class='k owner'>OWNER</span>" if p.get("role") else ""),
+            e(p.get("role") or p.get("label") or ""), e(p.get("agent") or ""), e(st),
+            e(str(p.get("ctx_pct") if p.get("ctx_pct") is not None else "?")),
+            e(str(p.get("usd") if p.get("usd") is not None else "?")), e(p.get("worktree") or "")))
+    for u in fs.get("unreachable", []):
+        H.append("<tr><td>%s</td><td><code>%s</code></td><td colspan='7'>UNREACHABLE — %s</td></tr>" % (
+            e(u.get("machine") or "?"), e(u.get("substrate") or ""), e(u.get("why") or "")))
+    if not fs.get("panes") and not fs.get("unreachable"):
+        H.append("<tr><td colspan='9'>no fleet-status.json yet — run tools/fleet-status --json</td></tr>")
+    H.append("</table>")
+    H.append("<h2>What Shaan said — %d entries, newest first (<a href='intent/index.html'>all, verbatim</a>)</h2><table>" % len(intents))
+    for p in intents[:6]:
+        meta, body = read_entry(p); ex = re.sub(r"\s+", " ", body.strip())[:180]
+        H.append("<tr><td><code>%s</code></td><td>%s%s</td><td>%s</td></tr>" % (e(meta.get("when", "")[:16].replace("T", " ")), e(ex), "…" if len(body) > 180 else "", e(meta.get("plane", ""))))
+    H.append("</table>")
+    H.append("<h2>Briefs and handoffs</h2><div class='grid'><div class='card'><h3>briefs (%d)</h3>%s</div><div class='card'><h3>handoffs (%d)</h3>%s</div></div>" % (
+        len(briefs), "<br>".join("<a href='briefs/%s'>%s</a>" % (e(os.path.basename(b)), e(os.path.basename(b))) for b in briefs) or "none",
+        len(hand), "<br>".join("<a href='handoffs/%s'>%s</a> <span class='sub'>%s</span>" % (e(os.path.basename(h)), e(os.path.basename(h)), datetime.date.fromtimestamp(os.path.getmtime(h))) for h in hand[:12]) or "none"))
+    H.append("<h2>Ledgers</h2><p>" + " · ".join("<a href='%s'>%s</a>" % (f, f) for f in ("OWNERS.md", "DECISION-LOG.html", "PROVEN-LEDGER.html", "HUMAN-GATE.md", "AGENT-ZERO-STATE.md", "DIGEST.md") if os.path.exists(os.path.join(T, f))) + "</p>")
+    if digest: H.append("<h2>Digest (last lines)</h2><pre>%s</pre>" % e("\n".join(digest)))
+    H.append("</body></html>")
+    open(out, "w").write("\n".join(H)); print("render-front: %s (%d intents, %d handoffs, %d panes)" % (out, len(intents), len(hand), len(fs.get("panes", []))))
+
+if __name__ == "__main__":
+    main()

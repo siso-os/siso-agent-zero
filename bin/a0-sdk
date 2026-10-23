@@ -20,7 +20,7 @@ unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES
 # then it gets way too expensive." Reverses the 1 Oct no-early-compact rule for Agent Zero.
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=40  # Shaan, 9 Oct ~00:45: "agents get pushed to autocompact way too early ... we gotta bump parameters" (was 35; 30 before 8 Oct)
 
-B="$HOME/SISO_Workspace/SISO_Agents/siso-harness-lab/bin"
+B="$HOME/SISO_Workspace/_data/worktrees/siso/live/agents/harness/bin"
 # shellcheck source=/dev/null
 source "$B/context-cap.sh"
 siso_context_cap "$@"
@@ -47,5 +47,5 @@ done
 [[ " ${out[*]-} " == *" --effort "* ]] || out+=(--effort "${A0_EFFORT:-xhigh}")
 
 cd "$(dirname "$(dirname "$(readlink -f "$0")")")"   # Agent Zero runs from its own repo
-exec "$HOME/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host" \
+exec "$HOME/SISO_Workspace/_data/worktrees/siso/live/apps/agent-base/services/host/bin/siso-host" \
   --keep-herdr-env --permission-mode bypassPermissions "${out[@]}"

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# team-upgrade — what changed in the template since this team pinned it, then relink the skills.
+#   tools/team-upgrade <path/to/team.yaml> [--apply]
+# Reads template.version from the team's manifest, prints the commits and changed files since that tag,
+# and with --apply relinks skills/* into ~/.claude/skills and rewrites template.version to the current tag.
+set -euo pipefail
+R="$(cd "$(dirname "$0")/.." && pwd)"
+TY="${1:?team.yaml path}"; APPLY="${2:-}"
+PIN="$(grep -E '^\s*version:' "$TY" | head -1 | awk '{print $2}' | tr -d '"')"
+CUR="v$(cat "$R/VERSION")"
+[[ -n "$PIN" ]] || { echo "team-upgrade: no template.version in $TY" >&2; exit 1; }
+echo "team pinned $PIN · template is $CUR"
+if git -C "$R" rev-parse -q --verify "$PIN" >/dev/null 2>&1; then
+  git -C "$R" log --oneline "$PIN..HEAD" | sed 's/^/  /'
+  echo "--- changed files"; git -C "$R" diff --stat "$PIN..HEAD" | tail -25 | sed 's/^/  /'
+else
+  echo "  (tag $PIN not found locally — git fetch --tags)"
+fi
+if [[ "$APPLY" == "--apply" ]]; then
+  for s in "$R"/skills/*/; do n="$(basename "$s")"; ln -sfn "$s" "$HOME/.claude/skills/$n"; done
+  sed -i.bak -E "s|^(\s*version:).*|\1 $CUR|" "$TY" && rm -f "$TY.bak"
+  echo "applied: skills relinked into ~/.claude/skills; $TY now pins $CUR"
+fi

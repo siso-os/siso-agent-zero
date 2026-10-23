@@ -25,11 +25,11 @@ def wait(cond, limit):
     print('timeout', read(), flush=True); sys.exit(2)
 s, c = read(); print('start', s, c, flush=True)
 if not skip_cp:
-    tell("A0: you're at %s%% context. Finish your current step, write your .agents/HANDOFF.md checkpoint (done, next, open threads, key paths), then stop and end your turn; I'll compact you and you'll resume from it." % c)
+    tell("A0: you're at %s%% context. Finish your current step, write your own .agents/agents/<seat>/HANDOFF.md checkpoint (done, next, open threads, key paths), then stop and end your turn; I'll compact you and you'll resume from it." % c)
     wait(lambda s, c: s == 'working', 600)
 wait(lambda s, c: s == 'idle', 5400)
 time.sleep(5); s, c = wait(lambda s, c: s == 'idle', 60)
 print('compacting at', c, flush=True); tell('/compact', sync=True)
 wait(lambda s, c: s == 'idle' and c is not None and c < 15, 1800)
-tell("A0: compacted. Read your .agents/HANDOFF.md checkpoint and carry on.")
+tell("A0: compacted. Read your own .agents/agents/<seat>/HANDOFF.md checkpoint and carry on.")
 print('done', read(), flush=True)

@@ -6,7 +6,7 @@ internal command which does slash new with their own startup prompts depending w
 Why: every Opus call re-reads the whole conversation (~190k on 12 Oct; calls over 150k were 62% of cost). A finished task
 carried forward is paid for again on every later call. A fresh start costs ~20-40k.
 
-A seat calls this on itself as its last action, after writing <repo>/.agents/HANDOFF.md:
+A seat calls this on itself as its last action, after writing <repo>/.agents/agents/<seat>/HANDOFF.md:
     nohup seat-fresh NAME --note "next: ..." >/dev/null 2>&1 &
 It waits until the seat's turn ends (idle), stops the host, and starts siso-host again in the same pane with the same name,
 model, login and repo, no --resume, and a startup prompt: who it is, read the HANDOFF top entry (and its brief if one is named
@@ -19,11 +19,47 @@ HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOSTS = f"{HOME}/.local/state/agent-base/hosts"
 STATE = f"{HOME}/.local/state/a0"
-HOST = f"{HOME}/SISO_Workspace/SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base/services/host/bin/siso-host"
+HOST = f"{HOME}/SISO_Workspace/_data/worktrees/siso/live/apps/agent-base/services/host/bin/siso-host"
 args = sys.argv[1:]
 if not args or args[0].startswith("-"): sys.exit(__doc__)
 who, now = args[0], "--now" in args
 note = args[args.index("--note") + 1] if "--note" in args else ""
+
+# SISO Code owners use the existing authenticated rotation, preserving history.
+# Self-invocation is detached; wait for this turn to finish, never interrupt it.
+from owner_idle import SEATS, DB, HARNESS, fresh_module, emit, snapshot, QUESTION
+mapped = json.loads(SEATS.read_text()).get(who) if SEATS.exists() else None
+if mapped and mapped.get('thread'):
+    import sqlite3
+    import datetime as dt
+    if mapped.get('runsOn', 'laptop') != os.environ.get('A0_OWNER_HOST', 'laptop'):
+        sys.exit('seat-fresh: run on the seat host')
+    fresh = fresh_module()
+    old_thread = mapped['thread']
+    with sqlite3.connect(DB.as_uri() + '?mode=ro', uri=True) as db:
+        for _ in range(360):
+            if not fresh.active_runs(db, old_thread):
+                break
+            time.sleep(5)
+        else:
+            sys.exit('seat-fresh: seat stayed busy; no refresh')
+        if json.loads(SEATS.read_text()).get(who, {}).get('thread') != old_thread:
+            sys.exit('seat-fresh: seat changed; no refresh')
+        state = snapshot(db, who, mapped)
+        if (state.get('zero') or state.get('error') or state.get('active') or state.get('queued') or
+                state.get('background') is not False or state.get('pending_input') is not False or
+                QUESTION.search(state.get('said', '')) or not state.get('checkpoint')):
+            sys.exit('seat-fresh: no safe completed owner checkpoint; retained')
+        handoff, memory = state['handoff'], state['memory']
+        cmd = [sys.executable, str(HARNESS / 'seat-fresh-t3'), who, '--handoff', str(handoff), '--memory', str(memory), '--finished-owner']
+        if note:
+            cmd.extend(['--note', note])
+        rc = subprocess.run(cmd).returncode
+        if rc == 0:
+            emit(dict(id=f'owner-idle:{old_thread}:fresh', at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                      source='owner-idle', kind='fresh', status='done', who=who, thread=old_thread,
+                      context_before=state.get('tokens')))
+        sys.exit(rc)
 
 def log(line):
     os.makedirs(STATE, exist_ok=True)
@@ -42,6 +78,8 @@ def record():
 rec = record()
 if not rec: log("no live host"); sys.exit(1)
 name, pane, cwd, old_session = rec["name"], rec["pane"], rec["cwd"], rec["session"]
+if name.casefold() in ("a0", "agent zero", "agent-zero", "orchestrator", "laptop orchestrator"):
+    cwd = f"{HOME}/SISO_Workspace/_data/worktrees/siso/live/agents/zero"
 cfg = rec.get("configDir") or f"{HOME}/.claude-siso"
 model = rec.get("model") or "claude-opus-5-5[1m]"
 # The seat usually calls this mid-turn: wait for that turn to end (up to 30 min), never cut it short unless --now.
@@ -52,7 +90,9 @@ if not now:
             if json.load(open(f"{HOSTS}/{pane.replace(':', '_')}.json")).get("state") == "idle": break
         except Exception: break
         time.sleep(5)
-handoff = f"{cwd}/.agents/HANDOFF.md"
+from a0_data_home import resolve_data_home, resolve_agent_home
+seat = "agent-zero" if cwd.endswith("/live/agents/zero") else name.lower()
+handoff = str(resolve_agent_home(resolve_data_home() if seat == "agent-zero" else cwd, seat) / "HANDOFF.md")
 try: brief = json.load(open(f"{STATE}/briefs.json")).get(name, "")
 except Exception: brief = ""
 prompt = (f"You are {name}, a fresh start of the same seat (the last conversation, {old_session}, finished a task and handed "

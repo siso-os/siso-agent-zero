@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SISO Project Team</title>
+<meta name="description" content="A team in a box: one Project Agent Zero, ephemeral owners, Qwen and Luna arms, and the shared services every SISO project team runs.">
+<style>
+:root{--bg:#faf9f7;--fg:#1a1a1a;--muted:#6b6b6b;--line:#e2e0dc;--card:#fff;--code:#f3f1ee;--brain:#7a5cff;--owner:#0f766e;--arm:#b45309;--bad:#b91c1c;--ok:#15803d;--shaan:#1d4ed8}
+@media(prefers-color-scheme:dark){:root{--bg:#11131a;--fg:#e6e6e6;--muted:#9a9aa3;--line:#2a2d36;--card:#181b23;--code:#1f2230}}
+body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Inter,system-ui,sans-serif;max-width:1040px;margin-inline:auto}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:36px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
+.sub{color:var(--muted);margin-bottom:18px}
+nav.toc{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin:0 0 8px}nav.toc a{color:var(--muted);text-decoration:none}nav.toc a:hover{color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h3{margin:0 0 6px;font-size:15px}.card p{margin:6px 0;color:var(--muted)}.card ul{margin:6px 0;padding-left:18px;color:var(--muted)}
+.k{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;padding:2px 7px;border-radius:999px;color:#fff;margin-right:6px;white-space:nowrap}
+.brain{background:var(--brain)}.owner{background:var(--owner)}.arm{background:var(--arm)}.bad{background:var(--bad)}.ok{background:var(--ok)}.shaan{background:var(--shaan)}.mut{background:var(--muted)}
+code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:6px}
+code{padding:1px 5px}pre{padding:12px 14px;overflow-x:auto}
+.tbl{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+svg{max-width:100%;height:auto;display:block;margin:10px auto}
+.svgtxt{font:13px -apple-system,Inter,system-ui,sans-serif;fill:var(--fg)}.svgmut{font:12px -apple-system,Inter,system-ui,sans-serif;fill:var(--muted)}.svgb{font-weight:700}
+.rule{border-left:3px solid var(--brain);padding:6px 12px;margin:10px 0;background:var(--card)}
+q{font-style:italic}
+a{color:inherit}
+</style></head><body>
+<h1>SISO Project Team — a team in a box</h1>
+<div class="sub">One repo every project team is stood up from: a <b>Project Agent Zero</b>, <b>ephemeral owners</b>, <b>Qwen and Luna arms</b>, and the shared services a team runs — its herdr space, its browser, its Plane project, its intent ledger, this front end. Dogfooded first on SISO Internal Labs, which now runs on it: its Project Agent Zero lives in pane <code>w1:pP</code> on the VPS, its team folder is the companion repo <code>sisodias/siso-internal-labs-agents</code>, and <code>az-notify</code> reaches him, not Shaan. Written 2026-09-11 from what is on the boxes; every "exists" below was read from source that day; "deployed" was seen in a pane. Repo: <code>sisodias/siso-project-team</code> (private; the front door for agents is its <code>AGENTS.md</code>). This page supersedes <a href="agent-team-v2.html">agent-team-v2</a>, which stays as the record of what broke.</div>
+<nav class="toc"><a href="#shape">The shape</a><a href="#words">His words → mechanisms</a><a href="#box">The box</a><a href="#roles">The three roles</a><a href="#harness">Harness by role</a><a href="#build">Exists · built · build · don't</a><a href="#oracle">Aligned with the Oracle plan</a><a href="#rulings">Rulings recorded</a><a href="lessons-from-oracle.html">Lessons from Oracle →</a></nav>
+
+<h2 id="shape">The shape — three tiers under one person, one box per project</h2>
+<svg viewBox="0 0 980 560" role="img" aria-label="Shaan at top; his personal Agent Zero below; then one project team box holding a Project Agent Zero, owners and arms, with shared services on the right; at the bottom the three repo kinds a team touches">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5 0 10z" fill="#9a9aa3"/></marker></defs>
+<rect x="20" y="14" width="940" height="50" rx="10" fill="#1d4ed8" opacity=".10" stroke="#1d4ed8"/>
+<text x="38" y="35" class="svgtxt svgb">Shaan</text>
+<text x="38" y="53" class="svgmut">talks in his own words · sees console cards and this page · decides credentials, money, production</text>
+<rect x="20" y="84" width="940" height="50" rx="10" fill="#7a5cff" opacity=".08" stroke="#7a5cff" stroke-dasharray="6 4"/>
+<text x="38" y="105" class="svgtxt svgb">Personal Agent Zero — tier 0, every project</text>
+<text x="38" y="123" class="svgmut">sisodias/siso-agent-zero-protocol: intent, estate, plan, ledger · reads each team's digest · can talk to any Project Agent Zero</text>
+<path d="M490 64 V84" stroke="#9a9aa3" marker-end="url(#a)"/>
+<rect x="20" y="156" width="940" height="300" rx="14" fill="none" stroke="#7a5cff" stroke-width="1.5"/>
+<text x="38" y="178" class="svgtxt svgb">One project team — one per project · one herdr space · one team folder in the project's companion repo</text>
+<path d="M490 134 V156" stroke="#9a9aa3" marker-end="url(#a)"/>
+<text x="500" y="150" class="svgmut">brief ↓ · digest ↑</text>
+<rect x="40" y="194" width="640" height="56" rx="10" fill="#7a5cff" opacity=".14" stroke="#7a5cff"/>
+<text x="56" y="216" class="svgtxt svgb">Project Agent Zero — Opus on Claude Code · one pane · resident, mostly idle</text>
+<text x="56" y="236" class="svgmut">his words → intent ledger → Plane → brief · spawns one owner per domain · closes them · keeps the front end true</text>
+<rect x="40" y="280" width="200" height="56" rx="10" fill="#0f766e" opacity=".14" stroke="#0f766e"/><text x="54" y="302" class="svgtxt svgb">Owner: tokens</text><text x="54" y="320" class="svgmut">Opus · Claude Code · ephemeral</text>
+<rect x="260" y="280" width="200" height="56" rx="10" fill="#0f766e" opacity=".14" stroke="#0f766e"/><text x="274" y="302" class="svgtxt svgb">Owner: health</text><text x="274" y="320" class="svgmut">brief → prove → handoff → exit</text>
+<rect x="480" y="280" width="200" height="56" rx="10" fill="none" stroke="#0f766e" stroke-dasharray="5 4"/><text x="494" y="302" class="svgmut">…one per domain,</text><text x="494" y="320" class="svgmut">none longer than the brief</text>
+<rect x="40" y="366" width="310" height="66" rx="10" fill="#b45309" opacity=".14" stroke="#b45309"/><text x="54" y="388" class="svgtxt svgb">Arm: Qwen3.8-27B — the pool, free</text><text x="54" y="406" class="svgmut">Codex harness · model_provider siso-pool</text><text x="54" y="424" class="svgmut">convert · grep · draft · bulk-edit</text>
+<rect x="370" y="366" width="310" height="66" rx="10" fill="#b45309" opacity=".14" stroke="#b45309"/><text x="384" y="388" class="svgtxt svgb">Arm: Luna — GPT-5.6, Codex plan</text><text x="384" y="406" class="svgmut">Codex harness · profile SISO</text><text x="384" y="424" class="svgmut">bounded implementation · repo read · tests</text>
+<path d="M140 250 V280" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M360 250 V280" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M580 250 V280" stroke="#9a9aa3" marker-end="url(#a)"/>
+<path d="M140 336 V366" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M360 336 V366" stroke="#9a9aa3" marker-end="url(#a)"/>
+<text x="360" y="268" class="svgmut" text-anchor="middle">brief ↓ · one az-send report ↑</text>
+<text x="250" y="356" class="svgmut" text-anchor="middle">brief file ↓ · one RETURN message ↑ · herdr spawns, herdr carries the reply</text>
+<rect x="700" y="194" width="240" height="238" rx="10" fill="none" stroke="#9a9aa3"/>
+<text x="716" y="216" class="svgtxt svgb">Shared services of the team</text>
+<text x="716" y="240" class="svgtxt">herdr space</text><text x="716" y="256" class="svgmut">one workspace, its own panes</text>
+<text x="716" y="278" class="svgtxt">camofox</text><text x="716" y="294" class="svgmut">own instance, userId = team</text>
+<text x="716" y="316" class="svgtxt">siso-browse</text><text x="716" y="332" class="svgmut">logged in once, proves pages</text>
+<text x="716" y="354" class="svgtxt">Plane project</text><text x="716" y="370" class="svgmut">the board Shaan looks at</text>
+<text x="716" y="392" class="svgtxt">intent ledger</text><text x="716" y="408" class="svgmut">every word he said, verbatim</text>
+<text x="716" y="424" class="svgtxt">front end + team.yaml</text>
+<rect x="20" y="478" width="300" height="62" rx="10" fill="none" stroke="#9a9aa3"/><text x="36" y="500" class="svgtxt svgb">Product repos (code)</text><text x="36" y="518" class="svgmut">clean: AGENTS.md ≤120 lines, one CI, queue</text><text x="36" y="534" class="svgmut">no state, briefs or decisions in here</text>
+<rect x="340" y="478" width="300" height="62" rx="10" fill="#7a5cff" opacity=".08" stroke="#7a5cff"/><text x="356" y="500" class="svgtxt svgb">Companion repo — the team's home</text><text x="356" y="518" class="svgmut">team.yaml · intent/ · briefs/ · handoffs/ · docs</text><text x="356" y="534" class="svgmut">symlinked into each code repo as .agents/</text>
+<rect x="660" y="478" width="300" height="62" rx="10" fill="none" stroke="#9a9aa3"/><text x="676" y="500" class="svgtxt svgb">sisodias/siso-project-team</text><text x="676" y="518" class="svgmut">the package: 3 role skills, tools/,</text><text x="676" y="534" class="svgmut">this page — improvements stick here</text>
+<path d="M490 456 V478" stroke="#9a9aa3" marker-end="url(#a)"/>
+</svg>
+<div class="rule">The team you have been talking to as "Agent Zero" this week was really the <b>Project Agent Zero of SISO Internal Labs</b>. The personal Agent Zero above it is <code>siso-agent-zero-protocol</code> — it keeps intent, estate and plan for every project and reads each team's <code>handoffs/DIGEST.md</code>. Owner reports stop landing in Shaan's pane the moment the Labs team has its own Agent Zero pane (build item 1); he stays in the loop through the digest and the console, which is the part that was good about it.</div>
+
+<h2 id="words">What Shaan said, and the mechanism each sentence becomes</h2>
+<div class="tbl"><table>
+<tr><th>His words (2026-09-11, verbatim)</th><th>Mechanism</th><th>State</th></tr>
+<tr><td><q>there's a whole agent's agent zero … my personal agent for the whole infrastructure, then there's one per project. The SISO internal is a project so it needs its own agent zero and then owners inside of it</q></td><td>Three tiers. Tier 0 = <code>siso-agent-zero-protocol</code>. Each team has <code>AGENT-ZERO.md</code> + the <code>project-agent-zero</code> skill, one pane in its own space, and reports up through a digest.</td><td><span class="k ok">DEPLOYED</span> Labs Agent Zero in <code>w1:pP</code>, briefed, writing its state</td></tr>
+<tr><td><q>we need like a repackageable skill that can be used for every new project team … any feedback and improvements actually stick with a repo</q></td><td>Three role skills in this repo, <b>linked</b> into <code>~/.claude/skills</code>, never copied — a lesson learned on one team is a commit here and the next team boots with it.</td><td><span class="k ok">BUILT</span></td></tr>
+<tr><td><q>each team will have its own space in a herdr server … and they'll have its own skills</q></td><td><code>tools/new-team.sh &lt;slug&gt; --herdr --az-pane</code> creates the workspace and the Agent Zero's pane and records both in <code>team.yaml</code>; owners and arms are spawned into that space only.</td><td><span class="k ok">BUILT</span> tested on the laptop's herdr</td></tr>
+<tr><td><q>how a team can run its own camofox</q></td><td>One camofox instance per team on the team's box, loopback port, <code>userId = team code</code>, so sessions and cookies never cross teams. The repo has a Dockerfile; nothing runs on the VPS yet.</td><td><span class="k ok">DEPLOYED</span> two instances on the VPS: <code>siso-camofox@labs</code> on 9377, <code>siso-camofox@byk</code> on 9378, loopback, one <code>userId</code> each; a real fetch proven through the Labs one</td></tr>
+<tr><td><q>the skill will basically be their front door to their personal operating system … how they're supposed to act … teach them how to use all other skills and navigate what data is important</q></td><td>Each role skill has a cold-start read order, the tool skills it carries and why, how to act, how to report, how to keep the box true. <code>siso-owner</code> stays the "how to think"; these are the "how this team runs".</td><td><span class="k ok">BUILT</span></td></tr>
+<tr><td><q>a nice readme and a nice cloudflare url front end in the readme … agents know how to update the cloudflare whatever when they improve it</q></td><td>README links this page; <code>tools/publish-front</code> deploys <code>docs/</code> to Pages and refuses to report success until the live page hashes the same as the file.</td><td><span class="k ok">BUILT</span></td></tr>
+<tr><td><q>they'll have the canonical tasks linked to the plane … somehow it's synced with plane</q></td><td><code>team.yaml → tasks.project</code>; every brief cites <code>Plane: CODE-nn</code> and <code>Intent: intent/&lt;file&gt;</code>. Next: <code>tools/intent-to-plane</code> turns an intent file into work items whose description is his verbatim words.</td><td><span class="k ok">DEPLOYED</span> <code>tools/intent-to-plane</code>: his entry → a work item titled with his first sentence, description verbatim, label <code>intent</code>, <code>plane: LABS-nn</code> written back into the entry</td></tr>
+<tr><td><q>every single word i've said to the agent zero is viewable and any future agent can go through it to see what we missed from it</q></td><td><code>tools/intent-capture</code>: reads Claude Code transcripts and relayed briefs, writes one verbatim file per message with time, session and source, builds an index. Owner relays, system text and tool output are not his words and are excluded. Idempotent.</td><td><span class="k ok">BUILT</span> Labs: 207 entries, 42,787 words, 9–11 Sep</td></tr>
+<tr><td><q>if the arms aren't available the owners can just do the work themselves or have built-in sub agents</q></td><td><code>owner</code>: pool down or plan off → do it inline or use the built-in Agent tool for a bounded piece, and <b>say which</b> in the handoff.</td><td><span class="k ok">BUILT</span></td></tr>
+<tr><td><q>opus is running their harness because they're the best in it … we'll have qwen running in codex for now and luna running in codex … herder can just spawn them … it will message it back to the agent anyways</q></td><td><code>tools/spawn-worker --harness claude|codex --model opus|luna|qwen</code>: herdr starts the agent in the team's space, then <code>az-send</code> hands it the brief path; the brief ends with the one message it sends back. Qwen becomes a Codex model through <code>codex/config.pool.toml</code>.</td><td><span class="k ok">DEPLOYED</span> Codex 0.154 on the VPS as <code>siso</code>; Luna proven (<code>LUNA-OK</code>). Qwen wired through <code>siso-pool</code> but the pool is <b>waiting for a Kaggle TPU slot</b> — not ours to fix</td></tr>
+<tr><td><q>it's kind of good that they've been messaging you, it means you're in the loop</q></td><td>Keep the loop, move the inbox: owners report to the Project Agent Zero's pane; the team's digest and the console keep Shaan and tier 0 in the loop without the fleet typing into his terminal.</td><td><span class="k ok">DEPLOYED</span> owners → <code>az-notify</code> → the Labs Agent Zero's pane; Shaan's laptop pane is no longer the fleet inbox</td></tr>
+<tr><td><q>we need two: an agent team template, and a siso internal labs agent space's own repo … everything needs to be in the repo, conversation history, my words, everything, all linked together … it also can be versioned</q></td><td>Two repos. <b>Template</b> <code>siso-project-team</code> (skills, tools, schema, this page; <code>VERSION</code>, <code>CHANGELOG.md</code>, tags; <code>tools/team-upgrade</code>). <b>Team</b> <code>siso-internal-labs-agents</code>: charter, state, briefs, relays, handoffs, <code>intent/</code>, and <code>sessions/</code> — redacted conversation history of the laptop Agent Zero, the VPS Agent Zero and the owners, with a manifest. Symlinked into the code repo as <code>.agents/</code>.</td><td><span class="k ok">DEPLOYED</span> v0.3.0 · Labs and Bykonz Yard both running on it</td></tr>
+</table></div>
+
+<h2 id="box">The box — what a team is made of</h2>
+<div class="grid">
+<div class="card"><h3>The package (this repo)</h3>
+<pre>AGENTS.md                    the front door: find out who you are, five rules
+team.yaml                    the manifest — schema and the first instance (Labs)
+skills/project-agent-zero/   the brain's front door + COMPACT.md (state prompt)
+skills/owner/                the ephemeral owner contract
+skills/worker-contract/      the arm contract + the JOB brief
+skills/team-front-door/      installable pointer for any host
+tools/new-team.sh            folder, manifest, herdr space, Agent Zero pane
+tools/spawn-worker           owner or arm into the space, brief in hand
+tools/az-send                clear, type, submit, read back — or fail loudly
+tools/siso-browse            one logged-in browser for the team
+tools/intent-capture         his words, verbatim, indexed
+tools/publish-front          docs/ → Pages, hash-checked
+tools/intent-to-plane        his words → linked Plane items
+tools/fleet-status           the three numbers + per-pane context and cost
+tools/render-front           a team's private page from what is true
+tools/sessions-import        conversation history in, secrets out
+tools/team-upgrade           what changed since a team pinned the template
+tools/az-deliver             the host-side forced command: notify, or a read-only fleet dump
+ops/siso-camofox@.service    one camofox per team, loopback
+codex/config.pool.toml       Qwen as a Codex model provider
+docs/                        this page + lessons-from-oracle</pre></div>
+<div class="card"><h3>One team (a folder, in its companion repo)</h3>
+<pre>team.yaml            project · host · herdr space + Agent Zero pane
+                     tasks (Plane) · agent_zero · owners.live_today
+                     arms.pools · browser · front_end · human_only
+AGENT-ZERO.md        the charter: specifics + domains table
+DIGEST.md            one dated line per change, for tier 0
+intent/              YYYYMMDD-HHMM-id.md + index.html · shaan-intent-log.json
+briefs/              TASK-*.md, one per owner
+handoffs/            HANDOFF-*.md
+workers/AGENTS.md    what a Codex arm reads first</pre>
+<p>Today <code>teams/siso-internal-labs/</code> lives inside the package to dogfood it. A project with a companion repo (Oracle's <code>oracle-agents</code>, Labs' <code>siso-internal-labs-server</code>) keeps its team folder there via <code>new-team.sh --into</code>. <b>Never in a product repo.</b></p></div>
+</div>
+
+<h2 id="roles">The three roles — front doors, not personas</h2>
+<div class="grid">
+<div class="card"><span class="k brain">BRAIN</span><h3>project-agent-zero</h3><p>Reads, in order: team.yaml → charter + state → <b>intent, newest first</b> → last three handoffs → Plane → the project's estate skill. Turns every sentence of Shaan's into a work item and a brief. One owner per domain; closes the pane when the handoff lands. Never dispatches arms. Never polls. Speaks to Shaan through the console and one page with a visual. Writes the digest for tier 0. Runs <code>intent-capture</code> and <code>publish-front</code> at close-out.</p></div>
+<div class="card"><span class="k owner">OWNERS</span><h3>owner</h3><p>Loads <code>siso-owner</code> for how to think, this for how the team runs. Boots on the brief, the intent file, the estate skill — nothing else. 20–60k tokens; past 150k, hand off and exit. Done means seen in a browser through the team's browse tool. Mechanical work goes to an arm with a full brief; no arms → inline or built-in sub-agents, said out loud. Shared index: <code>commit -- paths</code> only. One <code>az-send</code> report, then exit.</p></div>
+<div class="card"><span class="k arm">ARMS</span><h3>worker-contract</h3><p>No judgement, no rediscovery, no scope. The JOB brief has OWNER PANE · INPUT · DO · DO NOT · OUTPUT · CHECK · RETURN · STOP; if any line is missing the owner has not finished thinking. Work inside FILES, run CHECK, return a path and a window, send the one message, stop. Qwen for convert/grep/draft/bulk with everything inline; Luna for a bounded implementation that needs a real repo read.</p></div>
+</div>
+<div class="rule">Three roles is the cap. The Oracle diet (below) measured well-run agent repos at ~0 personas and ≤3 as the ceiling; the tool skills each role carries are the existing SISO ones, not new ones.</div>
+
+<h2 id="harness">Harness by role — as ruled today</h2>
+<div class="tbl"><table>
+<tr><th>Role</th><th>Model</th><th>Harness</th><th>Spawned by</th><th>Reports to</th><th>Today</th></tr>
+<tr><td>Project Agent Zero</td><td>Opus</td><td>Claude Code</td><td><code>new-team.sh --az-pane</code> → <code>spawn-worker --harness claude</code> into the team's space (on the VPS through <code>siso-agent</code>, which drops to <code>siso</code> without a second pty so herdr can see it)</td><td>tier 0 via <code>handoffs/DIGEST.md</code>; Shaan via the console</td><td>Labs: runs headless from the laptop, no pane</td></tr>
+<tr><td>Owner</td><td>Opus</td><td>Claude Code</td><td>Project Agent Zero, <code>spawn-worker --harness claude --brief</code></td><td>Agent Zero's pane, one <code>az-send</code></td><td>Labs: nine owners in <code>w1</code>, resident</td></tr>
+<tr><td>Arm — Luna</td><td>GPT-5.6 Luna</td><td>Codex CLI, profile <code>SISO</code></td><td>the owner, <code>spawn-worker --harness codex --model luna</code></td><td>the owner's pane, one RETURN</td><td>laptop only: Codex 0.153.4 is not installed on the VPS</td></tr>
+<tr><td>Arm — Qwen</td><td>qwen3.8-27b (pool, free)</td><td>Codex CLI, <code>model_provider = siso-pool</code> (<code>codex/config.pool.toml</code>, key from the environment)</td><td>the owner, <code>--model qwen</code></td><td>the owner's pane, one RETURN</td><td>pool serving through the VPS tunnel on :18080; Codex missing; <code>pool-qwen</code> carries the gateway key as a script default — move it to an env file</td></tr>
+<tr><td>Fallback</td><td>—</td><td>the owner's own built-in sub-agents (Claude Agent tool)</td><td>the owner</td><td>—</td><td>rule written into <code>project-owner</code></td></tr>
+</table></div>
+
+<h2 id="build">What exists, what was built today, what to build, what not to</h2>
+<div class="grid">
+<div class="card"><h3><span class="k ok">EXISTS</span> verified 2026-09-11</h3><ul>
+<li><b>herdr 0.6.5</b> on the laptop and the VPS: <code>workspace create</code>, <code>agent start</code>, <code>pane read</code> all work; <code>agent list</code> is empty on the VPS (LABS-7), so panes are addressed by id there. <code>integration install codex</code> exists.</li>
+<li><b>Plane</b> + the <code>plane</code> CLI, 15 projects; on the box <code>PLANE_BASE_URL=http://127.0.0.1:80</code>.</li>
+<li><b>Codex CLI 0.153.4</b> on the laptop, profile <code>SISO</code> pins <code>gpt-5.6-luna</code>; <code>-c model_provider=…</code> overrides per run.</li>
+<li><b>Qwen pool</b> serving; <code>pool-qwen --check</code> on the VPS; OpenAI-compatible chat endpoint.</li>
+<li><b>camofox</b> repo on the laptop with a Dockerfile; REST on :9377; per-user sessions.</li>
+<li><b>verify-page.mjs</b> + a verifier login on the VPS — the seed of <code>siso-browse</code>.</li>
+<li><b>az-notify</b> on the VPS → Shaan's laptop pane.</li>
+<li>Skills: <code>siso-owner</code> + the core packet, <code>siso-internal-labs</code>, <code>siso-plane-ops</code>, <code>siso-credentials</code>, <code>console</code>, <code>vps-browser-checks</code>.</li>
+<li>Repos: <code>siso-agent-zero-protocol</code> (tier 0), <code>siso-pool-agent-zero</code> (a hand-built project Agent Zero: brain/memory/sessions/inbox — the prior art for this box), <code>siso-project-os</code> v0.4.1 (project-local packets and lanes), <code>siso-agent-playbook</code> (Bifrost-era fleet skills), <code>siso-harness-lab</code> (the rulings).</li>
+<li><b>Oracle's companion-repo pattern</b>: <code>oracle-agents</code> symlinked into both code repos as <code>.agents/</code>, with the UNSLOP plan and Shaan's 80/20 rule.</li>
+<li>Cloudflare Pages account with wrangler; <code>siso-shell</code> for composed front doors.</li></ul></div>
+<div class="card"><h3><span class="k ok">BUILT TODAY</span> in this repo</h3><ul>
+<li>The three role skills merged with the 11:18Z draft of this repo (which already had <code>AGENTS.md</code>, <code>team.yaml</code>, <code>siso-browse</code>), plus the skill map.</li>
+<li><code>new-team.sh</code> (folder, manifest, herdr space, Agent Zero pane) — proven on a scratch space; the earlier draft parsed herdr's JSON wrongly and called a <code>pane new</code> that does not exist.</li>
+<li><code>spawn-worker</code> — proven with a raw process and a brief handed in.</li>
+<li><code>az-send</code> — clear with the raw Ctrl-U byte (herdr rejects every <code>ctrl-u</code> key spelling, so the earlier draft never cleared), type, submit, read back; proven on the VPS against a stranded line.</li>
+<li><code>intent-capture</code> — Labs ledger: 207 of Shaan's messages, 42,787 words, one file each plus the flat JSON; one 400k-word context stress test recognised and excluded (the earlier log counted it as 437k words of intent).</li>
+<li><code>publish-front</code> and this page, live at the Pages project the earlier draft was waiting for; <code>codex/config.pool.toml</code>.</li>
+<li><code>teams/siso-internal-labs/</code>: charter with the domains table, digest file, workers' AGENTS.md, the intent ledger.</li>
+<li>A dated entry in <code>siso-harness-lab/DECISIONS.md</code> recording today's rulings.</li></ul></div>
+</div>
+
+<h3 style="margin-top:22px">Build — in order, smallest change that removes the biggest failure</h3>
+<div class="tbl"><table>
+<tr><th>#</th><th>Change</th><th>Removes</th><th>Size</th><th>Needs</th></tr>
+<tr><td>1</td><td><s>Labs gets its Project Agent Zero pane; <code>az-notify</code> retargets</s> <b>Done 2026-09-11</b>: pane <code>w1:pP</code> as <code>siso</code>; <code>az-notify</code> → forced-command ssh → <code>az-deliver</code> → that pane; laptop resume retired.</td><td>silent death, the fleet's inbox in Shaan's terminal</td><td>—</td><td>—</td></tr>
+<tr><td>2</td><td><s><code>az-send</code> proven against root's herdr on the VPS</s> <b>Done</b>; briefs forbid raw <code>pane send-*</code>.</td><td>stranded dispatches</td><td>—</td><td>—</td></tr>
+<tr><td>3</td><td><b>Codex on the VPS</b> — <b>Done</b>: 0.154 as <code>siso</code>, auth carried over, <code>SISO_POOL_KEY</code> in an env file and out of <code>pool-qwen</code>, Luna exec proven. <b>Open</b>: the first Qwen-in-Codex brief, blocked until the pool serves (Kaggle TPU slot).</td><td>owners doing arms' work at Opus prices</td><td>—</td><td>Kaggle capacity</td></tr>
+<tr><td>4</td><td><b>camofox per team</b> — <b>Done</b>: <code>ops/siso-camofox@.service</code> ships with the template, <code>new-team.sh --camofox-port</code> enables it per team; Labs 9377, BYK 9378. <code>siso-browse</code> proven on the app and on the login-gated team page; the 53 scripts moved to <code>/tmp/pw/retired-2026-09-11/</code>.</td><td>53 ad-hoc scripts, leaked browsers, "renders" without proof</td><td>—</td><td>—</td></tr>
+<tr><td>5</td><td><code>tools/intent-to-plane</code> — <b>Done</b>; first real item LABS-13 created from his words and linked back.</td><td>sentences that never became tasks (Storage health took a day to reach anyone)</td><td>—</td><td>—</td></tr>
+<tr><td>6</td><td><b>Ephemeral owners in practice</b> — <b>In force</b>: the Labs Agent Zero closes owners whose handoffs landed and respawns only with a fresh brief; <code>tools/fleet-status</code> measures context and cost per pane (4.65M tokens resident across ten panes at 14:21) and the three numbers on every state write.</td><td>the $591-by-midday resident fleet</td><td>—</td><td>—</td></tr>
+<tr><td>7</td><td>The <b>Team tab</b> — <b>Dispatched</b> as LABS-18: it embeds the team page <code>tools/render-front</code> generates from what is true (manifest, intent, handoffs, fleet numbers), already live at <code>sisolabs.space/agents/</code> behind the login.</td><td>Shaan asking agents for status</td><td>one owner</td><td>—</td></tr>
+<tr><td>8</td><td><b>Second team</b> — <b>Done</b>: Bykonz Yard from one command — companion repo <code>sisodias/bykonzyard-agents</code> (54 verbatim intents, sessions), herdr space <code>w4</code>, Agent Zero in <code>w4:p2</code> briefed to audit intent vs what is live, code repo wired as <code>.agents/</code>, its own camofox. What broke became commits: herdr 0.9's <code>agent start</code>, the trust dialog, ESM ignoring <code>NODE_PATH</code>.</td><td>a box that only ever fit one project</td><td>—</td><td>—</td></tr>
+<tr><td>9</td><td><b>Private serving</b> — <b>Done</b>: <code>sisolabs.space/agents/</code> serves the Labs agent space behind the app's login (anonymous → 401; <code>.git</code> hidden). Intent, briefs, handoffs, ledgers and the team page, on Shaan's own domain.</td><td>his verbatim words on a public path</td><td>—</td><td>—</td></tr>
+</table></div>
+
+<div class="card" style="margin-top:14px"><h3><span class="k bad">DON'T BUILD</span></h3><ul>
+<li><b>A new tracker.</b> Plane stays the board. Beads is decided after a week of ephemeral owners, beside Plane if at all.</li>
+<li><b>Another Agent Zero protocol repo</b>, or one per project. Tier 0 stays where it is; project Agent Zeros live in companions. (Supersedes the 2026-09-10 "no per-project Agent Zero" note only in that a per-project <i>Agent Zero</i> now exists — still one package repo.)</li>
+<li><b>A model gateway or proxy.</b> Ruled out 2026-09-09; each harness talks to its own provider.</li>
+<li><b>Anything on a schedule.</b> Ruled out 2026-09-04. Intent capture and publishing are close-out steps, not cron.</li>
+<li><b>Per-owner bespoke skills.</b> One owner skill plus the team's domains table. A domain that repeats across three teams earns a tool skill, not a persona.</li>
+<li><b>Full adoption of siso-project-os.</b> Its packets, lanes and claims are heavier than a team needs; its idea of a project spine survives as <code>team.yaml</code>.</li>
+<li><b>A reviewer role for ordinary diffs.</b> Oracle's "parent acceptance" cost days and landed nothing; the only cold review is of sensitive paths, answering SHIP / FIX-FIRST / RETHINK (<a href="lessons-from-oracle.html">evidence</a>).</li>
+<li><b>Per-unit receipts, ACK files, evidence folders.</b> Oracle grew 3,000+ dated files and its agents stopped reading any of them; one ledger per kind in the companion (<a href="lessons-from-oracle.html">evidence</a>).</li>
+<li><b>Hand-built front ends per team.</b> The next step is <code>tools/render-front</code> reading <code>team.yaml</code>; this page is written by hand exactly once.</li></ul></div>
+
+<div class="card" style="margin-top:14px"><h3><span class="k shaan">ONLY SHAAN</span> open decisions carried from the 11:18Z draft</h3><ul>
+<li>Double the Labs host's RAM to 16 GB (~$10/month): nine resident CLIs plus OpenWA do not fit in 7.9 GB and produced three OOM kills. Ephemeral owners shrink this; the box is still tight.</li>
+<li>OpenWA on demand (stop when idle, start on click) once Contact moves.</li>
+<li>The compute-pool loop timer was disabled at 23:43Z on 10 Sep by someone — deliberate or not decides whether Qwen arms exist.</li>
+<li>Which Codex account the arms run on, and the Codex login on the VPS (build item 3).</li>
+<li>The compute-pool box escalated a gate-test contract question to a human (its <code>STATE.md</code>, 2026-09-11 tail): a test encodes the old blanket-deny rule for <code>tools/test_*.py</code>; main there is red until someone says which contract is intended.</li></ul></div>
+
+<h2 id="oracle">Aligned with the Oracle unslop plan — one box, not two</h2>
+<div class="rule">The full study — inventory, what it cost, keep, avoid, and the ten adoptions now folded into the skills above — is <a href="lessons-from-oracle.html"><b>Lessons from Oracle</b></a>. Oracle is the project SISO spent the most tokens on; its good and bad infrastructure is the template's training data.</div>
+<p>The Oracle owner's resume brief (<code>oracle-streaming/.agents/briefs/UNSLOP-RESUME.md</code>, 2026-09-11) carries Shaan's 80/20 rule — <q>if we take 80 of their stuff as base and then just add on and make it fit to the 20 of our stuff we'll have something really truly world class</q> — and a ten-step autonomy stack. This box is the team-side half of the same picture; the repo-side half stays in each code repo.</p>
+<div class="tbl"><table>
+<tr><th>Their step</th><th>Where it lives</th><th>In this box</th></tr>
+<tr><td>1 · gate + merge queue, no ceremony</td><td>each code repo</td><td>briefs say "lands through the repo's gate"; owners never hand-roll a landing</td></tr>
+<tr><td>2 · instruction diet: AGENTS.md ≤120 lines, skills ≤8, personas ≤3</td><td>each code repo</td><td>three roles, tool skills reused, <code>workers/AGENTS.md</code> is four lines</td></tr>
+<tr><td>3 · worktree lifecycle as a script, ≤3 live lanes</td><td>each code repo</td><td>owners use the repo's script; the box does not own worktrees</td></tr>
+<tr><td>4 · one tracker, one owners file</td><td>Plane + the companion</td><td><code>team.yaml → owners.live_today</code> is the owners file; Plane is the tracker</td></tr>
+<tr><td>5 · agent credentials without a browser</td><td><code>siso-credentials</code></td><td>every role skill says: that skill before asking anyone</td></tr>
+<tr><td>7 · verification surfaces, not screenshots in chat</td><td>dev server per worktree + DOM probe</td><td><code>siso-browse</code> over camofox is the team's probe; the handoff carries the path</td></tr>
+<tr><td>9 · one line of telemetry per session</td><td>SessionStart hook</td><td>herdr <code>pane list</code> + tokens rollup already exist; the Agents tab (build 7) is the view</td></tr>
+<tr><td>10 · boot in &lt;10k tokens</td><td>orientation = AGENTS.md + the agent-zero skill + the Plane item</td><td>the read orders above are that list; measure them on the second team</td></tr>
+</table></div>
+<div class="rule">Where the two agree exactly: state, briefs, decisions and evidence live in the companion repo, never in a product repo; the tier-0 protocol repo is the "all projects" level and gets the front door registered, not a copy. The Oracle team's <code>oracle-agents</code> is, in this vocabulary, its team folder — the first candidate for build item 8.</div>
+
+<h2 id="rulings">Rulings recorded today</h2>
+<p>Added to <code>siso-harness-lab/DECISIONS.md</code> under 2026-09-11, in his words: one Agent Zero per project under a personal Agent Zero; Opus brain and owners on Claude Code, Qwen and Luna arms on Codex spawned by herdr and messaging back (for arms this supersedes the 2026-09-03 "never spawn via herdr"); owners without arms do it themselves or with built-in sub-agents; the team is a repackageable box in <code>sisodias/siso-project-team</code>; every word to an Agent Zero is captured verbatim and viewable.</p>
+<p class="sub">Evidence read on 2026-09-11: <code>herdr</code> command surfaces on both machines, <code>az-notify</code> and <code>siso-agent</code> sources, <code>~/.codex/config.toml</code> profiles, <code>pool-qwen</code>, the five overlapping repos' READMEs, the Labs transcripts (three sessions), the seven relayed briefs, the Oracle resume brief at <code>442a7d7</code>. Scripts were run, not described: <code>new-team.sh --herdr --az-pane</code>, <code>spawn-worker</code>, <code>az-send --host siso-vps</code>, <code>intent-capture</code> twice for idempotence.</p>
+</body></html>

@@ -140,10 +140,34 @@ def main():
     p.add_argument("--wait", type=int, default=1800)
     p.add_argument("--bg", action="store_true", help="(default now; kept so old callers still work)")
     p.add_argument("--sync", action="store_true", help="deliver in the foreground and report; the default returns at once")
+    p.add_argument("--expected-thread", help="Refuse delivery if this mapped SISO Code seat changed")
+    p.add_argument("--request-id", help="Stable SISO Code delivery id for retry deduplication")
     p.add_argument("--queue", action="store_true", help="(default now; kept so old callers still work)")
     p.add_argument("--when-idle", action="store_true",
                    help="hold the line until the agent is idle instead of queueing it while it works (the old default)")
     a = p.parse_args()
+    # Migrated owners no longer have a Herdr input box. Reuse the existing paired
+    # MCP transport; never type a checkpoint into their abandoned pane.
+    from owner_idle import fresh_module, SEATS, DB
+    try:
+        mapped = json.load(open(SEATS)).get(a.pane)
+    except FileNotFoundError:
+        mapped = None
+    if mapped and mapped.get('thread'):
+        if a.expected_thread and mapped['thread'] != a.expected_thread:
+            print('a0-tell: seat thread changed; not sent', file=sys.stderr)
+            return 1
+        if mapped.get('runsOn', 'laptop') != os.environ.get('A0_OWNER_HOST', 'laptop'):
+            print('a0-tell: seat is remote; use its host', file=sys.stderr)
+            return 1
+        import types
+        client = fresh_module().Mcp(types.SimpleNamespace(db=DB, seats=SEATS))
+        payload = {'threadId': mapped['thread'], 'message': a.text, 'mode': 'auto'}
+        if a.request_id:
+            payload['clientRequestId'] = a.request_id
+        client.call('t3_thread_send', payload)
+        print(f'a0-tell: delivered to SISO Code seat {a.pane}')
+        return 0
     pane, why = resolve(a.pane)
     if not pane:
         log(a.pane, a.text, f"not sent: {why}")

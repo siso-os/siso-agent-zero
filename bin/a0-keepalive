@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Keep the named Agent Zero seat alive in its recorded Herdr pane.
 set -euo pipefail
+umask 077
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"  # launchd starts with a bare PATH; herdr and the claude launchers live here
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_DIR="${A0_KEEPALIVE_STATE_DIR:-$HOME/.local/state/a0}"
 SEAT_FILE="$STATE_DIR/seat.json"
 LOG_FILE="${A0_KEEPALIVE_LOG:-$STATE_DIR/keepalive.log}"
-INBOX="${A0_KEEPALIVE_INBOX:-$ROOT/.agents/a0/inbox.log}"
+INBOX="${A0_KEEPALIVE_INBOX:-${A0_PRIVATE_HOME:-$HOME/.local/state/a0/private}/inbox.log}"
 HERDR="${A0_KEEPALIVE_HERDR:-herdr}"
 SENDER="${A0_KEEPALIVE_SENDER:-}"
 NOTIFIER="${A0_KEEPALIVE_NOTIFIER:-osascript}"
@@ -16,7 +17,7 @@ PAUSE_FILE="$STATE_DIR/keepalive.pause"
 T3_SEATS="${A0_KEEPALIVE_T3_SEATS:-$HOME/.local/state/agent-base/t3-seats.json}"  # seats handed to SISO Code (bin/seat-to-t3)
 LOCK_DIR="$STATE_DIR/keepalive.lock"
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$(dirname "$INBOX")"
 usage() {
   cat <<'EOF'
 Usage:

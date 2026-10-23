@@ -10,13 +10,20 @@ that does not say it is still waiting; a short or waiting turn counts done only 
 words. A live run fleet-check flags STUCK (nothing written for its stuck threshold) exits at once as STUCK. Exits on the first seat done (or on all of them with --all) and prints each done seat's last words, redacted
 (setup and d links, password values). With --all and no SEAT it watches every out seat: sent to, not closed in
 ~/.local/state/a0/closed.jsonl. Polls fleet-check (0 tokens) every 60 s; gives up after --max-min (default 240).
+A seat's last message is reported DONE or PARKED once: its key is kept in ~/.local/state/a0/await-reported.jsonl.
 """
-import argparse, json, os, re, sqlite3, subprocess, sys, time
+import argparse, hashlib, json, os, re, sqlite3, subprocess, sys, time
 from datetime import datetime
+from pathlib import Path
+from contextlib import closing
 
-DB = os.path.expanduser("~/.local/state/siso-code/userdata/statev2.sqlite")
-LOG = os.path.expanduser("~/.local/state/a0/dispatch.jsonl")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from a0_receipts import dispatches, owner_receipt, stamp
+
+DB = os.environ.get("A0_T3_DB", os.path.expanduser("~/.local/state/siso-code/userdata/statev2.sqlite"))
+LOG = os.environ.get("A0_DISPATCH_FILE", os.path.expanduser("~/.local/state/a0/dispatch.jsonl"))
 CLOSED = os.path.expanduser("~/.local/state/a0/closed.jsonl")
+REPORTED = os.environ.get("A0_AWAIT_REPORTED", os.path.expanduser("~/.local/state/a0/await-reported.jsonl"))
 LIVE = ("queued", "preparing", "starting", "running", "waiting")
 # Words still gate it too: a Claude seat waiting on a background shell has no child run in the DB (four false pings on
 # 18 Oct). A seat that says it is still working counts done only after --quiet-min of silence.
@@ -50,6 +57,28 @@ def redact(s):
 def real_report(s):
     """A report worth a ping: over 600 characters, or a link to show him."""
     return len(s) > 600 or "https://" in s
+
+def said_key(r):
+    """One id per seat message: thread, run and a digest of its words. Same key, same message."""
+    r = r or {}
+    words = r.get("said_full") or r.get("said") or ""
+    return f"{r.get('thread')}:{r.get('run')}:{hashlib.sha256(words.encode()).hexdigest()[:16]}"
+
+def reported_keys():
+    """Messages an earlier a0-await run already reported, so a new run does not fire them again."""
+    keys = set()
+    if os.path.exists(REPORTED):
+        for line in open(REPORTED):
+            try:
+                keys.add(json.loads(line)["key"])
+            except (ValueError, KeyError, TypeError):
+                pass
+    return keys
+
+def remember(key):
+    os.makedirs(os.path.dirname(REPORTED), exist_ok=True)
+    with open(REPORTED, "a") as f:
+        f.write(json.dumps({"key": key, "at": datetime.now().isoformat(timespec="seconds")}) + "\n")
 
 def out_seats(names):
     """Seats Agent Zero sent work to and has not closed: the last send is later than the last close."""
@@ -139,9 +168,56 @@ def done(r, qmin):
     if pending_children(thread) != 0 or queued_runs(thread) != 0:
         return False  # a live child run, a queued send, or unknown is never done
     said = r.get("said_full") or r.get("said") or ""
+    if re.search(r"^STATUS:\s*(done|blocked|failed|needs-shaan)\b", said, re.M | re.I):
+        return True
     if quiet_min(r.get("activity")) >= qmin:
         return True
     return real_report(said) and not WAITING.search(said)
+
+# u257: a seat whose last words promise its own next action, with no background job in them, has parked (22-23 Oct:
+# HALO-WRAPUP and SISO-WRAPUP stopped 4 times for 30-90 min each). Nudge it once and report PARKED, not DONE.
+PROMISE = re.compile(r"\bi'?ll \w+|\bi will \w+|\bnext,? i\b|\bi'?m going to\b", re.I)
+BACKGROUND = re.compile(r"background|still running|running|in progress|waiting|wait for|wakes?\b|woken|"
+                        r"when (it|they) finish|pending", re.I)
+
+def parked(r):
+    said = (r.get("said_full") or r.get("said") or "") if r else ""
+    return bool(r) and r.get("status") == "completed" and pending_children(r.get("thread")) == 0 \
+        and queued_runs(r.get("thread")) == 0 and not re.search(r"^STATUS:", said, re.M | re.I) \
+        and bool(PROMISE.search(said)) and not BACKGROUND.search(said)
+
+def nudge(seat):
+    line = "A0: you said you would act next but stopped. Do it now; arm a wait if it runs long."
+    try:
+        return subprocess.run([str(Path(__file__).resolve().parent / "a0-tell"), seat, line],
+                              capture_output=True, text=True, timeout=60).returncode
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+def matches_dispatch(row, dispatch):
+    """Never attach an old completed turn to a newer send or replacement thread."""
+    if not dispatch:
+        return True
+    if not row or row.get('thread') != dispatch.get('thread'):
+        return False
+    try:
+        with closing(sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)) as db:
+            run = db.execute("select requested_at, completed_at from orchestration_v2_projection_runs "
+                             "where thread_id=? and ordinal=?", (row['thread'], row.get('run'))).fetchone()
+        return bool(run and max(stamp(run[0]), stamp(run[1])) >= stamp(dispatch.get('at')) > 0)
+    except sqlite3.Error:
+        return False
+
+
+def publish_return(row, dispatch, status, reason):
+    words = row.get('said_full') or row.get('said') or ''
+    explicit = re.search(r'^STATUS:\s*(done|blocked|failed|needs-shaan)\b', words, re.M | re.I)
+    if status == 'done' and explicit and explicit[1].lower() != 'done':
+        status = 'needs-shaan' if explicit[1].lower() == 'needs-shaan' else 'blocked'
+    if status == 'done' and not explicit and (not words.strip() or WAITING.search(words)):
+        status, reason = 'blocked', 'completed turn without a final report'
+    return owner_receipt(dispatch, row, status, reason)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[1])
@@ -160,24 +236,40 @@ def main():
         if not a.seats:
             print("nothing out")
             return 0
+    sent = {d['name']: d for d in dispatches(LOG) if d.get('thread') and d.get('name') in a.seats}
     time.sleep(90)  # a send takes a moment to start the seat's turn; don't read the old 'completed'
+    outcomes = {}
     end, seen, asked, hung = time.time() + a.max_min * 60, {}, {}, {}
     while time.time() < end:
         try:
             f = fleet()
         except Exception as e:  # fleet-check hiccup: try again next minute
             print(f"fleet-check failed: {e}", file=sys.stderr); time.sleep(60); continue
+        known = reported_keys()
         for s in a.seats:
             r = f.get(s)
-            if s in seen:
+            if s in seen or not matches_dispatch(r, sent.get(s)):
                 continue
+            key = said_key(r)
             q = pending_questions(r and r.get("thread"))  # a stuck question exits at once, whatever the status
             if q:
                 seen[s], asked[s] = r, q
+                outcomes[s] = publish_return(r, sent.get(s), "needs-shaan", "pending input request")
             elif stuck(r):  # a hung run exits at once, whatever --all says
                 seen[s], hung[s] = r, quiet_min(r.get("activity"))
-            elif done(r, a.quiet_min):
+                outcomes[s] = publish_return(r, sent.get(s), "blocked", "stuck run")
+            elif r and r.get('status') in ('failed', 'error', 'interrupted', 'cancelled') and pending_children(r.get('thread')) == 0 and queued_runs(r.get('thread')) == 0:
                 seen[s] = r
+                outcomes[s] = publish_return(r, sent.get(s), "blocked", "owner run " + r['status'])
+            elif parked(r) and key not in known:
+                seen[s] = r
+                nudge(s)
+                outcomes[s] = publish_return(r, sent.get(s), "parked", "promised its next action; nudged to do it now")
+                remember(key)
+            elif done(r, a.quiet_min) and key not in known:
+                seen[s] = r
+                outcomes[s] = publish_return(r, sent.get(s), "done", "completed; no queued or live child runs")
+                remember(key)
         if seen and (not a.all or len(seen) == len(a.seats) or hung):
             for s, r in seen.items():
                 words = redact(r.get("said_full") or "")[-1500:]
@@ -187,7 +279,7 @@ def main():
                 if s in asked:
                     print(f"NEEDS ANSWER {s} (question open since {asked[s][0][1]}; answer it or relay it): {words}")
                     continue
-                print(f"DONE {s} (quiet {r.get('activity')}): {words}")
+                print(f"{outcomes[s]['status'].upper()} {s} (quiet {r.get('activity')}): {words}")
             left = [s for s in a.seats if s not in seen]
             if left:
                 print("still working: " + " ".join(left))

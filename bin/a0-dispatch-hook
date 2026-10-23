@@ -167,7 +167,7 @@ def pre(tool, ti):
                         "(t3_thread_send) unless Shaan asked for a fresh one; after launching, record it: "
                         "`seat set NAME <threadId> --note ...`.")
         out("PreToolUse", context=warn + "After this launch, record the seat: `seat set NAME <threadId> --cwd DIR --note "
-            "'why'` so the org chart stays true.")
+            "'why'` AND add registry.json agents.NAME with workspace <group> so the org chart and sidebar group stay true.")
     if t in ("Agent", "Task"):
         st = str(ti.get("subagent_type") or "general-purpose")
         model = str(ti.get("model") or "")

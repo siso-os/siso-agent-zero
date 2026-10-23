@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""intent-to-plane — turn Shaan's verbatim intent entries into Plane work items, linked both ways.
+
+  intent-to-plane --team-dir <companion repo> --plane CODE [--since YYYY-MM-DD] [--dry-run] [--state Todo] [FILE...]
+
+For each intent file (default: every entry in <team-dir>/intent/ from --since, today by default,
+that has no `plane:` line yet) it creates a work item whose title is the first line of his words
+and whose description is the verbatim text with the source file, adds the label `intent` (created
+if missing), and writes `plane: CODE-nn` back into the entry's frontmatter. Uses the `plane` CLI
+from the siso-plane-ops skill; on a team host set PLANE_BASE_URL=http://127.0.0.1:80.
+"Somehow it's synced with Plane" — Shaan, 2026-09-11. This is the somehow.
+"""
+import argparse, datetime, glob, os, re, shutil, subprocess, sys
+
+def plane_bin():
+    for p in (os.environ.get("PLANE_BIN"), shutil.which("plane"),
+              os.path.expanduser("~/.claude/skills/siso-plane-ops/scripts/plane")):
+        if p and os.path.exists(p): return p
+    sys.exit("intent-to-plane: no `plane` CLI found (siso-plane-ops skill)")
+
+def run(args, dry):
+    if dry:
+        print("  would run:", " ".join(a if len(a) < 60 else a[:57] + "…" for a in args)); return ""
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("  plane failed:", (r.stderr or r.stdout).strip()[:300], file=sys.stderr)
+    return r.stdout
+
+def read_entry(p):
+    s = open(p, errors="ignore").read()
+    m = re.match(r"---\n(.*?)\n---\n\n?(.*)\Z", s, re.S)
+    meta = dict(l.split(": ", 1) for l in m.group(1).splitlines() if ": " in l) if m else {}
+    return meta, (m.group(2) if m else s), s
+
+def title_of(text):
+    t = re.sub(r"^\s*(\[Image #\d+\]\s*)+", "", text).strip()
+    t = re.sub(r"^⏺.*?(?=\b(to be fair|but|so|ok|okay|yeah|right|look|now)\b)", "", t, flags=re.S|re.I).strip() if t.startswith("⏺") else t
+    first = re.split(r"(?<=[.!?])\s+|\n", t, 1)[0].strip()
+    first = re.sub(r"\s+", " ", first)
+    return (first[:88] + "…") if len(first) > 90 else first or "(untitled intent)"
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--team-dir", required=True); ap.add_argument("--plane", required=True)
+    ap.add_argument("--since", default=datetime.date.today().isoformat())
+    ap.add_argument("--state", default=None); ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("files", nargs="*")
+    a = ap.parse_args(); P = plane_bin(); code = a.plane
+    files = a.files or sorted(glob.glob(os.path.join(a.team_dir, "intent", "*.md")))
+    made = skipped = 0
+    for p in files:
+        meta, body, raw = read_entry(p)
+        if "plane" in meta: skipped += 1; continue
+        if not a.files and meta.get("when", "")[:10] < a.since: continue
+        title = title_of(body)
+        desc = "Verbatim — %s, session %s. Source: intent/%s\n\n%s" % (meta.get("when", "")[:16].replace("T", " "), meta.get("session", ""), os.path.basename(p), body.strip())
+        print("%s → %s" % (os.path.basename(p), title))
+        args = [P, "new-task", code, title, "--desc", desc] + (["--state", a.state] if a.state else [])
+        out = run(args, a.dry_run)
+        if a.dry_run: continue
+        m = re.search(r"\b(%s-\d+)\b" % re.escape(code), out or "") or re.search(r'"sequence_id":\s*(\d+)', out or "")
+        if not m: print("  no item id in output:", (out or "")[:200], file=sys.stderr); continue
+        item = m.group(1) if "-" in m.group(1) else "%s-%s" % (code, m.group(1)); made += 1
+        r = subprocess.run([P, "label-add", code, item, "intent"], capture_output=True, text=True)
+        if r.returncode != 0 and "no label" in (r.stdout + r.stderr):
+            run([P, "new-label", code, "intent", "--color", "#7a5cff"], False); run([P, "label-add", code, item, "intent"], False)
+        if not raw.startswith("---"): raw = "---\n---\n\n" + raw
+        new = raw.replace("\n---\n", "\nplane: %s\n---\n" % item, 1)
+        open(p, "w").write(new); print("  created %s and linked back" % item)
+    print("intent-to-plane: created=%d already-linked=%d" % (made, skipped))
+
+if __name__ == "__main__":
+    main()

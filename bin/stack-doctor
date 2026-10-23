@@ -14,9 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
 WS = os.path.join(HOME, "SISO_Workspace")
-AB = os.path.join(WS, "SISO_Agency/apps/siso-internal-labs/siso-internal-labs-agent-base")
+MAIN = os.path.join(WS, "_data/worktrees/siso/main")  # sisodias/siso main checkout: Agent Base is apps/agent-base in it
 CLAUDE_OK = re.compile(r"^(claude-(opus-5-5|sonnet-5-5|fable-5-1|haiku-4-5)|<synthetic>)")
-CODEX_OK = {"gpt-6-luna", "gpt-6.1-sol", "codex-auto-review"}
+CODEX_OK = {"gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "codex-auto-review"}  # astra: Sol's fallback (routing.json rule_22_oct_sol_sunset)
 CLAUDE_ROOTS = [HOME + "/.claude", HOME + "/.claude-siso", HOME + "/.config/claude-siso-3"]
 BANNED_LOGINS = {HOME + "/.claude-siso": "fuzeheritage (Claude Code disabled by its org)", HOME + "/.config/claude-fahmy": "Fahmy's login"}
 CAP, OWNER_CAP, CODEX_CAP = 300_000, 500_000, 450_000
@@ -37,7 +37,14 @@ def sh(*a, timeout=10):
 
 def recent(pattern, hours):
     cut = time.time() - hours * 3600
-    return [f for f in glob.glob(pattern, recursive=True) if os.path.getmtime(f) >= cut]
+    keep = []
+    for f in glob.glob(pattern, recursive=True):
+        try:
+            if os.path.getmtime(f) >= cut:
+                keep.append(f)
+        except OSError:  # deleted or rotated between glob and stat
+            pass
+    return keep
 
 
 def tail_lines(path, n=400_000):
@@ -199,26 +206,23 @@ def codex(hours):
         lvl, why = ("amber", f", all before the config last changed at {time.strftime('%H:%M', time.localtime(fixed_at))}") if newest < fixed_at and not olds else ("red", "")
         add(lvl, "codex-model", f"old Codex model {m} in the last {hours}h{why}: {', '.join(sorted({w for w, _ in where}))[:200]}")
     if not bad:
-        add("green", "codex-model", f"every Codex session in the last {hours}h is on gpt-6-luna or gpt-6.1-sol")
+        add("green", "codex-model", f"every Codex session in the last {hours}h is on gpt-6-luna, gpt-6.1-sol or gpt-6-astra")
     for ctx, w in sorted(big, reverse=True)[:3]:
         add("amber", "codex-context", f"{ctx // 1000}k context in a Codex session ({w[-80:]})")
 
 
 def agent_base():
+    """Agent Base runs on this laptop: :5401 proxies its active slot. Behind means apps/agent-base has newer commits on main."""
     try:
-        v = json.loads(urllib.request.urlopen("http://127.0.0.1:5401/api/version", timeout=5).read())
+        live = json.loads(urllib.request.urlopen("http://127.0.0.1:5401/api/version", timeout=5).read())["sha"]
     except Exception as e:
         add("red", "ab-live", f"Agent Base on :5401 does not answer ({e.__class__.__name__})")
         return
-    main = sh("git", "-C", AB, "rev-parse", "origin/main").strip()
-    live = v.get("sha", "")
-    if live and main and live == main:
-        add("green", "ab-live", f"Agent Base live = origin/main ({main[:7]})")
+    behind = sh("git", "-C", MAIN, "rev-list", "--count", f"{live}..origin/main", "--", "apps/agent-base").strip()
+    if behind == "0":
+        add("green", "ab-live", f"Agent Base live {live[:7]} = apps/agent-base on origin/main")
     else:
-        behind = sh("git", "-C", AB, "rev-list", "--count", f"{live}..{main}").strip() if live and main else "?"
-        add("amber", "ab-live", f"Agent Base live {live[:7]} is {behind} commit(s) behind origin/main {main[:7]} (the ship queue deploys on land)")
-    runner = sh("pgrep", "-f", "tools/ab-queue run").split()
-    add("green" if runner else "red", "ab-queue", "ship queue runner is running" if runner else "ship queue runner is NOT running: nothing lands")
+        add("amber", "ab-live", f"Agent Base live {live[:7]} is {behind or '?'} apps/agent-base commit(s) behind main; deploy: apps/agent-base/tools/ab-live")
 
 
 def machines():

@@ -11,7 +11,7 @@ test("stack-doctor --json: rows with level/check/msg, all families, exit 1 iff a
   assert.ok(rows.length >= 8);
   for (const x of rows) assert.ok(["red", "amber", "green"].includes(x.level) && x.check && x.msg, JSON.stringify(x));
   const names = new Set(rows.map((x) => x.check));
-  for (const n of ["claude-agents", "claude-model", "codex-config", "codex-cap", "ab-queue", "laptop-disk", "backup"]) assert.ok(names.has(n), n);
+  for (const n of ["claude-agents", "claude-model", "codex-config", "codex-cap", "ab-live", "laptop-disk", "backup"]) assert.ok(names.has(n), n);
   assert.strictEqual(r.status, rows.some((x) => x.level === "red") ? 1 : 0);
   assert.ok(!rows.some((x) => /check crashed/.test(x.msg)), "no check crashed");
 });

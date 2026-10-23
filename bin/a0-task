@@ -11,19 +11,23 @@ import json
 import os
 import re
 import sys
+import subprocess
 import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(os.environ.get("A0_DATA_HOME", Path.home() / "SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if (Path(__file__).resolve().parents[3] / ".siso").is_dir() else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from a0_data_home import resolve_data_home
+
+ROOT = resolve_data_home() if os.environ.get("A0_DATA_HOME") or (Path(__file__).resolve().parents[3] / ".siso").is_dir() else Path(__file__).resolve().parent.parent
 TASKS = ROOT / "tasks"
 INDEX = TASKS / "INDEX.json"
 PLAN = ROOT / ".agents/A0-plan.json"  # generated view, read only by the Agent Base hub
 ASKS = ROOT / ".agents/a0/pages/asks/asks.json"
 STAGES = ("thought", "specced", "allocated", "building", "built", "tested", "preview",
           "live", "feedback", "happy", "rework", "dropped")
-STAGE_ALIASES = {"integrated": "live"}  # 2 Oct redesign: "on preview" and "live" are real stages; old name kept as an alias
+STAGE_ALIASES = {"integrated": "live", "done": "live"}  # 2 Oct redesign: "on preview" and "live" are real stages; old names kept as aliases ("done": hand-written, 23 Oct)
 PRIORITIES = ("P0", "P1", "P2", "P3")
 EVIDENCE_STAGES = {"built", "tested", "preview", "live"}
 FEEDBACK_STAGES = {"happy", "rework"}
@@ -31,6 +35,52 @@ PLAN_STATUS = {"thought": "asked", "specced": "specced", "allocated": "allocated
                "building": "building", "built": "built", "tested": "checked",
                "preview": "checked", "live": "checked", "feedback": "checked", "happy": "checked",
                "rework": "building", "dropped": "dropped"}
+DELIVERY_FIELDS = ("module_id", "source_authority", "task_authority", "task_id", "run_id",
+                   "tested_commit", "landed_commit", "running_commit", "target",
+                   "writable_state_home", "evidence_link", "observed_at", "observed_result")
+MODULE_DELIVERY_FIELDS = {"source_authority", "task_authority", "target", "writable_state_home"}
+
+
+def delivery_record(task, module=None):
+    """Project facts, never infer a release or successful run from task stage/prose."""
+    result = dict.fromkeys(DELIVERY_FIELDS)
+    result["task_id"] = task["id"]
+    result["task_authority"] = "a0-task"
+    if module:
+        result.update({k: v for k, v in module.get("delivery", {}).items()
+                       if k in MODULE_DELIVERY_FIELDS})
+        result["module_id"] = module.get("id") or module.get("name")
+        if not result["module_id"]:
+            raise ValueError("module requires an id or name")
+    facts = task.get("delivery") or {}
+    if module and facts.get("module_id") not in (None, result["module_id"]):
+        raise ValueError("task and module identity disagree")
+    result.update({k: v for k, v in facts.items() if k in DELIVERY_FIELDS})
+    if result["writable_state_home"] == "$A0_DATA_HOME":
+        result["writable_state_home"] = str(ROOT)
+    return result
+
+
+def cmd_resolve(args):
+    task = read_task(args.id)
+    module = None
+    if args.module:
+        module = json.loads(Path(args.module).read_text())
+    elif (task.get("delivery") or {}).get("module_id"):
+        repo = Path(__file__).resolve().parents[3]
+        catalog = json.loads((repo / ".siso/generated/index.json").read_text())
+        mid = task["delivery"]["module_id"]
+        if mid not in catalog:
+            raise ValueError(f"module outside this catalog: {mid}; supply --module from its source repo")
+        path = catalog[mid]["path"] + "/module.json"
+        if (repo / path).is_file():
+            module = json.loads((repo / path).read_text())
+        else:
+            module = json.loads(subprocess.check_output(
+                ["git", "-C", str(repo), "show", "HEAD:" + path], text=True))
+    facts = delivery_record(task, module)
+    print(json.dumps({"record_id": task["id"], "delivery": facts,
+                      "missing": [k for k, v in facts.items() if v is None]}, indent=2))
 
 
 def now():
@@ -81,7 +131,8 @@ def fresh_task(task_id, title, his, project="SISO", priority="P2", stage="though
     stamp = now()
     return {"id": task_id, "title": title, "his": his, "intent": intent or [],
             "project": project, "priority": priority, "stage": stage, "owner": owner,
-            "agent": agent, "model": model,
+            "agent": agent, "model": model, "done_check": None,
+            "delivery": {"task_id": task_id},
             "links": {"spec": None, "plan_item": plan_item, "pr": None, "url": None},
             "evidence": evidence or [], "feedback": {"at": None, "his": None, "verdict": None},
             "parent": None, "next": None, "created": stamp, "updated": stamp,
@@ -92,6 +143,8 @@ def index_data():
     tasks = [json.loads(path.read_text(encoding="utf-8"))
              for path in TASKS.glob("*.json") if path.name != "INDEX.json"]
     tasks.sort(key=lambda t: (t["priority"], t["updated"], t["id"]))
+    for task in tasks:
+        task["stage"] = STAGE_ALIASES.get(task["stage"], task["stage"])
     stages = Counter(t["stage"] for t in tasks)
     projects = Counter(t.get("project") or "SISO" for t in tasks)
     priorities = Counter(t["priority"] for t in tasks)
@@ -100,7 +153,7 @@ def index_data():
                        "by_project": dict(sorted(projects.items())),
                        "by_priority": dict(sorted(priorities.items()))},
             "tasks": [{k: task.get(k) for k in
-                       ("id", "title", "project", "priority", "stage", "owner", "model", "updated")}
+                       ("id", "title", "project", "priority", "stage", "owner", "model", "updated", "due")}
                       for task in tasks]}
 
 
@@ -111,10 +164,11 @@ def plan_view(index):
     for task in records:
         items.append({"id": task["id"], "title": task["title"], "his": task["his"],
                       "intent": task["intent"], "spec": task["links"].get("spec"),
-                      "status": PLAN_STATUS[task["stage"]],
+                      "status": PLAN_STATUS[STAGE_ALIASES.get(task["stage"], task["stage"])],
                       "to": {"agent": task.get("agent") or task.get("owner") or "A0"},
                       "evidence": task["evidence"], "parent": task.get("parent"),
-                      "at": task["updated"][:10]})
+                      "at": task["updated"][:10], "done_check": task.get("done_check"),
+                      "delivery": delivery_record(task)})
     return {"_generated": "Generated from tasks/ by bin/a0-task index. Do not hand-edit.",
             "owner": "A0", "project": "SISO", "domain": "Agent Zero: priorities, owners, the org",
             "updated": index["updated"], "items": items}
@@ -283,15 +337,32 @@ def cmd_set(args):
     task = read_task(args.id)
     allowed = {"owner", "agent", "model", "priority", "project", "links.spec",
                "links.plan_item", "links.pr", "links.url", "links.source", "links.brief",
-               "next", "parent", "touches", "supersedes"}
+               "next", "parent", "touches", "supersedes", "done_check", "due"}
     for assignment in args.fields:
         if "=" not in assignment:
             raise ValueError(f"expected field=value: {assignment}")
         field, value = assignment.split("=", 1)
+        if field.startswith("delivery."):
+            key = field.split(".", 1)[1]
+            if key not in DELIVERY_FIELDS:
+                raise ValueError(f"field cannot be set: {field}")
+            if key.endswith("_commit") and value and not re.fullmatch(r"[0-9a-f]{7,40}|[0-9a-f]{64}", value):
+                raise ValueError(f"invalid commit: {field}")
+            task.setdefault("delivery", {})[key] = value or None
+            continue
         if field not in allowed:
             raise ValueError(f"field cannot be set: {field}")
         if field == "priority" and value not in PRIORITIES:
             raise ValueError(f"invalid priority: {value}")
+        # A due time makes the task a goal on SISO Code's Tasks tab; empty clears it.
+        if field == "due" and value:
+            try:
+                due = datetime.fromisoformat(value)
+            except ValueError:
+                raise ValueError(f"invalid due (ISO time with zone, e.g. 2026-10-23T20:05+07:00): {value}") from None
+            if due.tzinfo is None:
+                raise ValueError(f"due needs a zone, e.g. {value}+07:00")
+            value = due.isoformat(timespec="minutes")
         if field in ("touches", "supersedes"):
             task[field] = [x.strip() for x in value.split(",") if x.strip()]
             continue
@@ -348,6 +419,10 @@ def parser():
     show = sub.add_parser("show", help="show one task")
     show.add_argument("id")
     show.set_defaults(run=lambda a: print(json.dumps(read_task(a.id), ensure_ascii=False, indent=2)))
+    resolve = sub.add_parser("resolve", help="source/run/release facts; unknowns remain null")
+    resolve.add_argument("id")
+    resolve.add_argument("--module", help="existing module.json, including one in an external source repo")
+    resolve.set_defaults(run=cmd_resolve)
     listing = sub.add_parser("list", help="list task summaries")
     listing.add_argument("--project")
     listing.add_argument("--stage", choices=STAGES)

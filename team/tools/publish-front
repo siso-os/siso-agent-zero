@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# publish-front — deploy docs/ to Cloudflare Pages and prove the live page matches.
+#   publish-front            deploys to the project in PAGES_PROJECT (default siso-project-team)
+# Agents: run this after any change to docs/. The README links the URL it prints.
+set -euo pipefail
+R="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT="${PAGES_PROJECT:-siso-project-team}"
+WRANGLER="${WRANGLER:-npx --yes wrangler@3}"
+[[ -f "$R/docs/index.html" ]] || { echo "publish-front: docs/index.html missing" >&2; exit 1; }
+grep -qiE 'sk-[a-z]{2}-|BEGIN (RSA|OPENSSH) PRIVATE|password *[:=]' -r "$R/docs" && { echo "publish-front: docs/ contains something that looks like a secret; refusing" >&2; exit 3; }
+OUT="$($WRANGLER pages deploy "$R/docs" --project-name "$PROJECT" --branch main --commit-dirty=true 2>&1 | tail -20)"
+echo "$OUT" | grep -E 'https://' || { echo "$OUT"; exit 1; }
+URL="https://$PROJECT.pages.dev/"
+sleep 4
+CODE="$(curl -s -o /tmp/publish-front.html -w '%{http_code}' "$URL")"
+LOCAL="$(shasum -a 256 "$R/docs/index.html" | cut -c1-16)"; LIVE="$(shasum -a 256 /tmp/publish-front.html | cut -c1-16)"
+echo "live $URL -> $CODE  local=$LOCAL live=$LIVE"
+[[ "$CODE" == 200 && "$LOCAL" == "$LIVE" ]] || { echo "publish-front: live page does not match (propagation can take ~30s; re-run to re-check)" >&2; exit 2; }

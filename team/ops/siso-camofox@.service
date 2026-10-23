@@ -1,0 +1,18 @@
+[Unit]
+Description=SISO camofox for team %i (headless anti-detection browser, loopback only)
+After=network.target
+
+[Service]
+User=siso
+Group=siso
+WorkingDirectory=/opt/camofox-browser
+EnvironmentFile=/etc/siso-camofox/%i.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+MemoryMax=1500M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
-OUT = HERE / ".agents/a0/transcript"
+OUT = Path(os.environ.get("A0_PRIVATE_HOME", Path.home() / ".local/state/a0/private")) / "transcript"
 TZ = dt.timezone(dt.timedelta(hours=7))
 SLUGS = ("00-agent-zero", "siso-agents-agent-zero-firstmate", "siso-workspace-firstmate",
          "siso-agents-firstmate", "siso-agent-zero-protocol", "agent-zero-siso-firstmate", "agent-zero-siso-agent-zero", "00_agent_zero")
@@ -633,4 +633,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    os.umask(0o077)
     raise SystemExit(main(sys.argv))

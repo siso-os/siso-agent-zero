@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# siso-browse — ONE logged-in browser for the whole team.
+#
+# Replaces the 53 ad-hoc Playwright scripts written in /tmp/pw in one day, 41 of which read the
+# credential file themselves and all of which launched their own Chromium. This logs in once
+# with the team's verifier account (never the human's cookie), persists the session as a
+# Playwright storageState, and reuses it. Runs as the agents' user on the team host.
+#
+#   siso-browse shot  <path-or-url> <out.png> [--full]    screenshot (the proof of "done")
+#   siso-browse text  <path-or-url>                        rendered innerText
+#   siso-browse click <path-or-url> <selector> [out.png]  click, wait for network idle, shoot
+#   siso-browse login                                      force a fresh login
+#
+# Config (team.yaml → browser.*): SISO_BROWSE_BASE (site), SISO_BROWSE_LOGIN (verifier.env),
+# SISO_BROWSE_STATE (storage_state path). Paths starting with / are joined to the base.
+set -euo pipefail
+BASE="${SISO_BROWSE_BASE:-https://sisolabs.space}"
+LOGIN_ENV="${SISO_BROWSE_LOGIN:-/opt/orca-eval/verifier.env}"
+STATE="${SISO_BROWSE_STATE:-/opt/siso-browse/state.json}"
+cmd="${1:-}"; shift || true
+case "$cmd" in shot|text|click|login) ;; *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 64;; esac
+url="${1:-}"; [ "$cmd" = login ] || { [ -n "$url" ] || { echo "need a path or url" >&2; exit 64; }; case "$url" in /*) url="$BASE$url";; esac; }
+mkdir -p "$(dirname "$STATE")"
+export SB_CMD="$cmd" SB_URL="${url:-}" SB_ARG2="${2:-}" SB_ARG3="${3:-}" SB_FULL="${4:-${3:-}}" SB_BASE="$BASE" SB_LOGIN_ENV="$LOGIN_ENV" SB_STATE="$STATE"
+abs() { case "$1" in ""|/*) printf '%s' "$1";; *) printf '%s/%s' "$PWD" "$1";; esac; }
+SB_ARG2="$(abs "${SB_ARG2:-}")"; case "${SB_ARG3:-}" in *.png) SB_ARG3="$(abs "$SB_ARG3")";; esac; export SB_ARG2 SB_ARG3
+# Node resolves a bare `import "playwright"` from the importer's directory, and an inline module's
+# importer is <cwd>/[eval]; NODE_PATH does not apply to ESM. So run from the home that has node_modules.
+cd "${SISO_BROWSE_HOME:-/opt/siso-browse}" 2>/dev/null || cd /tmp/pw 2>/dev/null || { echo "siso-browse: no home with node_modules (/opt/siso-browse)" >&2; exit 1; }
+exec node --input-type=module -e '
+import { chromium } from "playwright";
+import { readFileSync, existsSync } from "node:fs";
+const { SB_CMD, SB_URL, SB_ARG2, SB_ARG3, SB_FULL, SB_BASE, SB_LOGIN_ENV, SB_STATE } = process.env;
+const b = await chromium.launch({ args: ["--no-sandbox"] });
+try {
+  let ctx;
+  const needLogin = SB_CMD === "login" || !existsSync(SB_STATE);
+  if (needLogin) {
+    // credentials: KEY=VALUE lines, readable by the agents user only; never printed
+    const env = Object.fromEntries(readFileSync(SB_LOGIN_ENV, "utf8").split("\n").filter(l => l.includes("=")).map(l => { const i = l.indexOf("="); return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^["\x27]|["\x27]$/g, "")]; }));
+    // Two-step Plane login, copied from the flow that verify-page.mjs proved all day:
+    // email → continue → (wait) → password → sign in → (wait). A single fill+Enter bounces.
+    ctx = await b.newContext();
+    const p = await ctx.newPage();
+    await p.goto(SB_BASE + "/", { waitUntil: "networkidle", timeout: 45000 });
+    await p.waitForTimeout(2500);
+    const email = p.locator("input[type=email], input[name=email]").first();
+    if (await email.count()) {
+      await email.fill(env.VERIFIER_EMAIL ?? env.EMAIL);
+      await p.getByRole("button", { name: /continue|next|sign in|log in/i }).first().click().catch(() => {});
+      await p.waitForTimeout(3500);
+      const pw = p.locator("input[type=password]").first();
+      if (await pw.count()) {
+        await pw.fill(env.VERIFIER_PASSWORD ?? env.PASSWORD);
+        await p.getByRole("button", { name: /sign in|log in|continue|submit/i }).first().click().catch(() => {});
+        await p.waitForTimeout(8000);
+      }
+    }
+    // Prove it before saving: a logged-in Plane session answers /api/users/me/ with 200.
+    const me = await p.request.get(SB_BASE + "/api/users/me/").catch(() => null);
+    if (!me || me.status() !== 200) { console.error("siso-browse: login FAILED (" + (me ? me.status() : "no response") + " from /api/users/me/) — session not saved"); process.exit(3); }
+    await ctx.storageState({ path: SB_STATE });
+    console.log("siso-browse: logged in (users/me 200), session saved");
+    if (SB_CMD === "login") process.exit(0);
+  } else {
+    ctx = await b.newContext({ storageState: SB_STATE });
+  }
+  const p = await ctx.newPage({ viewport: { width: 1280, height: 800 } });
+  await p.goto(SB_URL, { waitUntil: "networkidle", timeout: 45000 });
+  if (SB_CMD === "shot") { await p.screenshot({ path: SB_ARG2, fullPage: SB_FULL === "--full" }); console.log("siso-browse: " + SB_ARG2); }
+  if (SB_CMD === "text") { console.log(await p.evaluate(() => document.body.innerText)); }
+  if (SB_CMD === "click") { await p.click(SB_ARG2); await p.waitForLoadState("networkidle"); if (SB_ARG3) { await p.screenshot({ path: SB_ARG3 }); console.log("siso-browse: " + SB_ARG3); } }
+  // a redirect to a sign-in form means the saved session died: refresh it once, loudly
+  if (/sign-in|login|welcome/i.test(p.url()) && !needLogin) { console.error("siso-browse: session expired — run `siso-browse login`"); process.exit(2); }
+  await ctx.storageState({ path: SB_STATE });
+} finally { await b.close(); }
+'

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lessons from Oracle — what to keep, what to avoid</title>
+<style>
+:root{--bg:#faf9f7;--fg:#1a1a1a;--muted:#6b6b6b;--line:#e2e0dc;--card:#fff;--code:#f3f1ee;--brain:#7a5cff;--owner:#0f766e;--arm:#b45309;--bad:#b91c1c;--ok:#15803d;--shaan:#1d4ed8}
+@media(prefers-color-scheme:dark){:root{--bg:#11131a;--fg:#e6e6e6;--muted:#9a9aa3;--line:#2a2d36;--card:#181b23;--code:#1f2230}}
+body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Inter,system-ui,sans-serif;max-width:1040px;margin-inline:auto}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:36px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
+.sub{color:var(--muted);margin-bottom:18px}
+nav.toc{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin:0 0 8px}nav.toc a{color:var(--muted);text-decoration:none}nav.toc a:hover{color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h3{margin:0 0 6px;font-size:15px}.card p{margin:6px 0;color:var(--muted)}.card ul{margin:6px 0;padding-left:18px;color:var(--muted)}
+.k{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;padding:2px 7px;border-radius:999px;color:#fff;margin-right:6px;white-space:nowrap}
+.brain{background:var(--brain)}.owner{background:var(--owner)}.arm{background:var(--arm)}.bad{background:var(--bad)}.ok{background:var(--ok)}.shaan{background:var(--shaan)}.mut{background:var(--muted)}
+code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:6px}
+code{padding:1px 5px}pre{padding:12px 14px;overflow-x:auto}
+.tbl{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+svg{max-width:100%;height:auto;display:block;margin:10px auto}
+.svgtxt{font:13px -apple-system,Inter,system-ui,sans-serif;fill:var(--fg)}.svgmut{font:12px -apple-system,Inter,system-ui,sans-serif;fill:var(--muted)}.svgb{font-weight:700}
+.rule{border-left:3px solid var(--brain);padding:6px 12px;margin:10px 0;background:var(--card)}
+q{font-style:italic}
+a{color:inherit}
+</style></head><body>
+<h1>Lessons from Oracle — what to keep, what to avoid</h1>
+<div class="sub">Oracle Streaming is the SISO project that has burned the most tokens. Its own diagnosis, ledgers and measured numbers are read here once, so a team standing up from <code>siso-project-team</code> inherits the mechanisms that worked and skips the ones that cost a week. Paths are relative to <code>SISO_Agency/apps/oracle-streaming</code>; <code>.agents/</code> is the symlinked companion repo (<code>sisodias/oracle-agents</code>, on disk <code>apps/oracle-companions/agents</code>).</div>
+<nav class="toc"><a href="#inv">1 · Inventory</a><a href="#cost">2 · What it cost</a><a href="#keep">3 · Keep</a><a href="#avoid">4 · Avoid</a><a href="#team">5 · Adopt into the team template</a><a href="#labs">6 · Adopt into SISO Internal Labs</a><a href="#ev">Evidence</a></nav>
+
+<div class="rule"><span class="k shaan">Shaan · 2026-09-11</span> <q>there's a lot of active learning data that you can use from oracle it's by far the project that we've spent the most tokens on so you should take good infrastructure and bad infrastructure from there note it down ... look at it to learn from it for the siso internal for the just standard bases and then also integrate it into the siso internal</q> <span class="sub">(quoted in the brief for this page)</span></div>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-11</span> <q>i'm happy with your plan … just don't completely fuck our shit … if we take 80 of their stuff as base and then just add on and make it fit to the 20 of our stuff we'll have something really truly world class.</q> <span class="sub">(<code>.agents/briefs/UNSLOP-RESUME.md</code>)</span></div>
+
+<h2 id="inv">1 · Inventory — what Oracle built for its agents</h2>
+<p>Verdicts: <span class="k ok">KEEP</span> proven and portable · <span class="k arm">REWORK</span> the idea is right, the shape is not · <span class="k bad">AVOID</span> measured harm.</p>
+<div class="tbl"><table>
+<tr><th>Mechanism</th><th>Path</th><th>One line</th><th>Verdict</th></tr>
+<tr><td>Four-layer gate</td><td><code>scripts/fleet/verify-4-layers.mjs</code></td><td>typecheck, depcruise, Vitest and a convention gate in one command; JSON per layer; exit 0/1/2, <code>--only</code> returns PARTIAL 3; green on clean main since <code>2c3f9442f</code></td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Red-baseline ratchet</td><td><code>scripts/fleet/red-baseline.json</code></td><td>main's five red test files at a named SHA; a lane may fix a listed red, never add one</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Landing rule 1</td><td><code>.agents/briefs/unfuck-20260905/MASTER.md</code></td><td>gate green on the rebased tip, no new red, one line from the builder, then push; no reviewer for ordinary diffs</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Cold review, sensitive paths only</td><td><code>.agents/briefs/unfuck-20260905/COLD-REVIEW.md</code></td><td>fresh-context read-only review answering SHIP / FIX-FIRST / RETHINK, only for credentials, tokens, wipe paths, deploy scripts, schema</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>The one human gate</td><td><code>docs/SAFETY-GUARDRAILS.html</code></td><td>binding account-safety rules; stop on any identity or captcha prompt; a human present for every live window</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Proven ledger</td><td><code>docs/PROVEN-LEDGER.html</code></td><td>"what is already built + tested (read FIRST)": 47 dated rows, each proving only its named run</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Ranked broken list</td><td><code>.agents/briefs/unfuck-20260905/BROKEN.md</code></td><td>one Sweep seat read the corpus once; 119 ranked rows with repros, 88 fixed by the next morning</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Seat recaps</td><td><code>.agents/briefs/unfuck-20260905/recaps/</code></td><td>checkpoint on disk before any restart: asked, delivered with SHAs, wasted, open, undocumented</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Owner map</td><td><code>.agents/OWNERS.md</code></td><td>under 40 lines: surface · seat · branch · Plane item · last landed; replace rows, never append</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Routing-only session hook</td><td><code>scripts/session-onramp.mjs</code></td><td>663 bytes pointing at the boot files; its contract forbids status, SHAs, credentials or live commands</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Reuse nudges</td><td><code>.claude/hooks/ponytail-*.mjs</code></td><td>PreToolUse "does this already exist?" on new capability; SubagentStart reuse reminder; fail-open</td><td><span class="k ok">KEEP</span> (the hooks, not the 148-line skill)</td></tr>
+<tr><td>Cockpit verify</td><td><code>.claude/skills/oracle-cockpit-verify/</code></td><td>Playwright DOM probe at the user's real window width after any UI change</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Domain model</td><td><code>siso-internal-labs-server/docs/ORACLE-DOMAIN-MODEL.md</code></td><td>four lanes, three gates, two feeds; the four rejected decompositions are written down</td><td><span class="k ok">KEEP</span></td></tr>
+<tr><td>Process-home split</td><td><code>.agents -&gt; ../oracle-companions/agents</code></td><td>process files out of the product repo; still tracked in three repos (7,778 / 8,356 / 98 files)</td><td><span class="k ok">KEEP</span>, finish it</td></tr>
+<tr><td>Decision log</td><td><code>docs/DECISION-LOG.html</code></td><td>353 entries tagged WIN, TRAP, DECISION, LEARN; 1.44 MB; append-only; lives in the product repo</td><td><span class="k arm">REWORK</span></td></tr>
+<tr><td>Boot route</td><td><code>CLAUDE.md</code> 157 lines + <code>AGENTS.md</code> 82 + <code>oracle-agent-zero</code> skill 421</td><td>three files that mostly say which sources to distrust; churned 6, 4 and 10 times in six days</td><td><span class="k arm">REWORK</span></td></tr>
+<tr><td>Branch-hygiene session hook</td><td><code>scripts/branch-hygiene.mjs</code></td><td>hard ceilings 12 / 8 / 6; prints 13 KB and "HARD CEILING BREACHED" every session</td><td><span class="k arm">REWORK</span></td></tr>
+<tr><td>Worktree script</td><td><code>scripts/fleet/worktree-for.sh</code></td><td>one detached worktree per task under a lock; hard-codes a July review branch and the legacy <code>.claude/worktrees</code> root</td><td><span class="k arm">REWORK</span></td></tr>
+<tr><td>Lane close</td><td><code>.claude/skills/oracle-lane-close/</code></td><td>receipt states <code>promotion-queued</code> / <code>active-hold</code>; "no receipt means the lane is still open"</td><td><span class="k arm">REWORK</span></td></tr>
+<tr><td>Runs, briefs, memory</td><td><code>.agents/runs/</code> 237 · <code>briefs/</code> 181 · <code>memory/</code> 220</td><td>a receipt, a handoff and an evidence folder per unit of work</td><td><span class="k arm">REWORK</span>: evidence stays, receipts stop</td></tr>
+<tr><td>Owner history file</td><td><code>.agents/briefs/A0-STATE.md</code></td><td>appended prose; the current owner is one row near the top; frozen 2026-09-11</td><td><span class="k bad">AVOID</span></td></tr>
+<tr><td>Skills catalog</td><td><code>.claude/skills/</code> 29 (4,074 lines) · <code>.codex/skills/</code> 14 · <code>.agents/skills/</code> 3</td><td>two harnesses, overlapping; most skills with zero measured invocations</td><td><span class="k bad">AVOID</span> at this size</td></tr>
+<tr><td>Agent personas</td><td><code>.claude/agents/</code> 15</td><td>named roles that AGENTS.md already covers; zero dispatches measured</td><td><span class="k bad">AVOID</span></td></tr>
+<tr><td>Landing lock</td><td><code>/tmp/oracle-primary-git.lock</code> (AGENTS.md rule 2)</td><td>a mkdir lock serialising every landing through one path</td><td><span class="k bad">AVOID</span></td></tr>
+<tr><td>Task records</td><td><code>.agents/tasks/</code></td><td>47 in_progress, none dated since August; Plane HALO is the tracker</td><td><span class="k bad">AVOID</span></td></tr>
+<tr><td>CI</td><td><code>.github/workflows/</code> (5)</td><td>five workflows on every push and PR, 15 jobs per CI run; every job refused since 2026-09-05</td><td><span class="k bad">AVOID</span></td></tr>
+</table></div>
+
+<h2 id="cost">2 · What it cost</h2>
+<p>Every number has the file it came from. No dollar figure for Oracle exists in the named sources; the only cash measure is the GitHub Actions free tier. Idle time was not measured as a percentage anywhere; the proxy Oracle used is seat-hours against commits on main.</p>
+<div class="tbl"><table>
+<tr><th>Measure</th><th>Value</th><th>Source</th></tr>
+<tr><td>Seat-hours to the first commit on main, 5–6 Sep</td><td>about 75 seat-hours of Astra at xhigh, 0 commits; the next 15 seat-hours, 44 commits, the token-bomb fix deployed, 88 of 119 broken rows closed</td><td><code>siso-harness-lab/docs/lessons/2026-09-06-oracle-fleet-token-waste.md</code></td></tr>
+<tr><td>Coordinator time</td><td>Agent Zero polled one status command for 2 h 21 m; its transcript reached 26 MB, mostly reading 138 JSONLs</td><td>same file</td></tr>
+<tr><td>Permissions and transport</td><td>7 seat-hours on Codex flags that did not take; the send wrapper reported FAILED on every delivery while seats sat idle</td><td>same file</td></tr>
+<tr><td>Infrastructure</td><td>a raw Vite dev server hit 35 GB and kernel-panicked the Mac, killing every seat</td><td>same file</td></tr>
+<tr><td>Oracle Agent Zero on Codex, one day (8 Sep)</td><td>247 responses; 86,265,377 input tokens, 2,334,753 uncached; 156,733 output; largest request 509,919</td><td><code>siso-harness-lab/reports/2026-09-08-economical-reset/README.md</code></td></tr>
+<tr><td>Claude sessions on Oracle, 20 Aug–3 Sep</td><td>three oracle-streaming sessions of 1,112 / 572 / 312 turns; median context 288k / 290k / 473k; 311 M / 162 M / 139 M context tokens; 108 of 117 sessions fleet-wide never compacted</td><td><code>siso-harness-lab/reports/2026-09-claude-reramp/01-transcript-audit.md</code></td></tr>
+<tr><td>CI minutes</td><td>0 billable minutes: the free 2,000 min/month exhausted by push-on-every-branch (301 runs on 29 Aug, 130 on 10 Sep, 15 jobs each); every job refused from 5 Sep</td><td><code>.agents/briefs/UNSLOP-RESUME.md</code></td></tr>
+<tr><td>Files</td><td><code>docs/</code> 4,387 files, 3,435 under archive; <code>dest/</code> 1,597 with one importer; <code>.agents/</code> tracked in three repos, 313 main-only and 891 companion-only files diverged</td><td><code>.agents/briefs/ASTRA-DOCS-UNFUCK.md</code> (diagnosis); <code>docs/DECISION-LOG.html</code> entry 2026-09-11</td></tr>
+<tr><td>Skills and personas</td><td>28 skills + 15 agents + 1 command in <code>.claude/</code>, 13 in <code>.codex/</code>; 16,414 always-loaded description bytes, 591 proposed; counted again 2026-09-11: 29 / 15 / 14</td><td><code>siso-harness-lab/reports/2026-09-claude-reramp/06-oracle-skills-classification.md</code>; <code>ASTRA-DOCS-UNFUCK.md</code></td></tr>
+<tr><td>Branches and worktrees</td><td>175 remote, 39 local, 21 worktrees on 10 Sep; 194 / 31 / 29 in the primary checkout on 11 Sep; 44 worktrees inspected at the reset</td><td><code>ASTRA-DOCS-UNFUCK.md</code>; <code>.agents/briefs/reset-20260911/worktree-review.json</code></td></tr>
+<tr><td>Boot cost</td><td>157 + 82 + 421 lines, churned 6 / 4 / 10 times in six days</td><td><code>ASTRA-DOCS-UNFUCK.md</code> diagnosis</td></tr>
+<tr><td>Owner state file</td><td>153 KB; 857 lines of SHAs and byte counts</td><td><code>ASTRA-DOCS-UNFUCK.md</code>; <code>docs/DECISION-LOG.html</code> 2026-09-11</td></tr>
+<tr><td>Hook noise</td><td>13,346 bytes printed every session; ceilings 12 / 8 / 6 against 51 / 181 / 34</td><td><code>06-oracle-skills-classification.md</code>; <code>docs/DECISION-LOG.html</code> 2026-09-11</td></tr>
+<tr><td>Duplicate work</td><td>five near-duplicate copies of one device-token fix across lanes; a memory note called it "never landed" because a cherry-pick changes the hash</td><td><code>ASTRA-DOCS-UNFUCK.md</code></td></tr>
+<tr><td>Worktree weight before the split</td><td>about 600 MB per lane paid by <code>.agents/</code></td><td><code>.agents/README.md</code></td></tr>
+</table></div>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-05</span> <q>We need to do it in a way where it's not just gated on me and builds and all of this bullshit. There's a bunch of slop, the docs are slop, it's hard for any agents to know what's going on.</q> <span class="sub">(<code>.agents/briefs/unfuck-20260905/MASTER.md</code>)</span></div>
+
+<h2 id="keep">3 · KEEP — mechanisms proven valuable</h2>
+<p><b>One runnable gate, ratcheted against main's own reds.</b> The same six seats produced zero commits in forty seat-hours under "all tests green" on a main with red files, and 44 commits in the fifteen hours after the rule became "no new red versus main". The model did not change; the rule did (<code>2026-09-06-oracle-fleet-token-waste.md</code>; MASTER log 2026-09-05T20:25Z). The gate is now one command with a committed baseline and a PARTIAL exit for partial runs (DECISION-LOG entry <code>2026-09-11-landing-gate-one-command-ratchet-partial-ci-dead</code>).</p>
+<p><b>The builder lands; a reviewer only for sensitive paths.</b> Ordinary diffs land on the gate plus one line in the builder's words: what it does, what it deliberately does not do, what breaks if it is wrong. A fresh-context review is required only for credentials, tokens, wipe paths, deploy scripts and the schema (MASTER rule 1; <code>COLD-REVIEW.md</code>).</p>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-06 03:45</span> <q>Astra is good enough in most cases; we shouldn't be wasting compute on reviewers.</q> <span class="sub">(MASTER rule 1; DECISION-LOG <code>2026-09-06-landing-rule-final-no-routine-reviewer</code>)</span></div>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-06</span> <q>trust the model; a lot of the admin/reviewer stuff is just not trusting the model enough.</q> <span class="sub">(<code>2026-09-06-oracle-fleet-token-waste.md</code>)</span></div>
+<p><b>Seats own outcomes, not units.</b> "Proposal written", "bounded unit" and "awaiting review" are not terminal states; a seat is done when its outcome is on main or on the VPS (MASTER rule 3; <code>OWNERS.md</code> rules). This is the same rule the team template already carries as "exit on handoff".</p>
+<p><b>One human gate, written down once.</b> <code>docs/SAFETY-GUARDRAILS.html</code> survived every reorganisation because it has a stable owner and carries a real receipt: the Chaturbate account warning of 2026-06-05. Everything else is agent authority (MASTER rule 2).</p>
+<p><b>A proven ledger read first.</b> <code>PROVEN-LEDGER.html</code> exists because, in its own words, agents reading cold code "keep 'discovering' that already-built, already-tested, already-LIVE-PROVEN features don't exist, then flag them as ship-blockers". Each row proves only its named run.</p>
+<p><b>One sweep, one ranked list.</b> One seat read every JSONL and ledger once and wrote <code>BROKEN.md</code> with a repro per row; nobody else read the corpus (MASTER rule 5). 88 of its 119 rows closed in the fifteen productive hours.</p>
+<p><b>A recap on disk before any restart.</b> Asked, delivered with SHAs, wasted, open, undocumented, so a fresh context resumes from main alone (<code>recaps/</code>, nine files).</p>
+<p><b>An owner map that is replaced, not appended.</b> <code>OWNERS.md</code> is the 40-line answer to the 153 KB state file: surface, seat, branch, Plane item, last landed, delete the row when the seat ends.</p>
+<p><b>Fleet discipline that transferred cleanly.</b> Fork fresh from <code>origin/main</code>; classify by reading (it caught a 73-file leak in the VPS split); contracts not duplication; verify on git truth with every percentage stating its denominator; every brief ends CONSTRAINTS / RETURN / STOP (<code>AGENTS.md</code> rules 1, 3, 4, 5, 6). The team template already has the last two.</p>
+<p><b>Verify at the user's width.</b> A cockpit change was "verified" at 1600px while Shaan runs at about 1320px, below a media query; the fix was real and invisible to him (<code>oracle-cockpit-verify</code> seed incident). This is the Oracle form of "done means a picture".</p>
+<p><b>A routing-only session hook with a written contract.</b> <code>session-onramp.mjs</code> declares that it never asserts status, SHAs, credentials or live commands, and <code>CLAUDE.md</code> says a hook that does is broken.</p>
+<p><b>Three numbers per hour.</b> Commits on main, deploys receipted, ranked rows closed. Flat for an hour means the rule is wrong, not the seat. Pane status is not a signal (token-waste lesson; DECISION-LOG <code>2026-09-06-shaan-replan-operator-astra-ui-fable</code>).</p>
+<p><b>Lanes are the domains; bars are gates.</b> The domain model records four rejected decompositions so nobody re-proposes them, and separates "who owns what now" from "are we ready to launch" (<code>ORACLE-DOMAIN-MODEL.md</code>).</p>
+
+<h2 id="avoid">4 · AVOID — anti-patterns with the harm on record</h2>
+<p><b>An absolute gate on a red baseline.</b> "All tests green" on a repo that is not green is an impossible task that looks like work; every pane said "working" for seven hours (token-waste lesson, item 1).</p>
+<p><b>Human holds inside an autonomous fleet.</b> "Active-hold, review by tomorrow" on every lane made the fleet's output a queue for Shaan: four Astras, 34 seat-hours, zero lines on main, with the fix for the bug that killed the product sitting on four unlanded branches (MASTER diagnosis).</p>
+<p><b>A weaker reviewer for ordinary diffs.</b> One round per landing, one model second-guessing another (token-waste lesson, item 3).</p>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-06 03:40</span> <q>Sol is a stupid model, you should be using Astra for any intelligence, it's way more efficient.</q> <span class="sub">(<code>COLD-REVIEW.md</code>)</span></div>
+<p><b>Read-proof rituals and a three-file boot.</b> Agent Zero's 26 MB transcript was mostly reading 138 JSONLs before touching code. The boot route was 660 lines across three files, churned 6, 4 and 10 times in six days, and its main job was telling agents which of four files to distrust (<code>ASTRA-DOCS-UNFUCK.md</code>).</p>
+<p><b>A receipt, a handoff and an evidence folder per unit.</b> 237 runs, 181 briefs, 220 memory files. In the diagnosis's words: "Doc slop is downstream: every unit emits a receipt, a handoff and an evidence folder, and nothing may be deleted" (MASTER).</p>
+<p><b>Prose instead of mechanism.</b> "No trustworthy mechanical signal existed anywhere, so every seat replaced mechanism with prose, and the prose forked across three repos" (<code>ASTRA-DOCS-UNFUCK.md</code>, diagnosis). The concrete fork: <code>.agents/</code> tracked in three repos with 313 and 891 files diverged.</p>
+<p><b>An append-only state file as the owner registry.</b> 153 KB where the current owner is one row near the top and everything below is superseded; 857 lines of SHAs. Frozen on 2026-09-11 in favour of <code>OWNERS.md</code>.</p>
+<p><b>A second tracker.</b> 47 tasks "in_progress" with no updated date; TASK-0975 cited evidence in the old portal, not the app being built (<code>ASTRA-DOCS-UNFUCK.md</code>). Plane HALO is the tracker.</p>
+<p><b>Skill and persona sprawl across two harnesses.</b> 57 skill and agent docs, most with zero invocations, 15 naming removed providers, 16 KB of descriptions loaded every session (<code>06-oracle-skills-classification.md</code>). The research memo Oracle itself gathered cites the Vercel evals: skills never invoked in 56% of runs, while an always-loaded index scored 100% (<code>.agents/memory/unslop-research-sources-20260911.md</code>).</p>
+<p><b>CI on every push of every branch.</b> Five workflows, 15 jobs per run, 301 runs in one day; the free tier died on 5 Sep and nobody noticed for a week because CI had never been green (<code>UNSLOP-RESUME.md</code>; the 2026-09-11 DECISION-LOG entry: "GitHub Actions is dead, not red").</p>
+<div class="rule"><span class="k shaan">Shaan · 2026-09-11</span> <q>the only ones we need back will be for the oracle streaming … we need to keep within the free limits.</q> <span class="sub">(<code>UNSLOP-RESUME.md</code>)</span></div>
+<p><b>A hook that shouts every session.</b> Ceilings 12 / 8 / 6 against 51 / 181 / 34 means "HARD CEILING BREACHED" in 13 KB at every SessionStart. A warning that is always on is not a signal.</p>
+<p><b>Memory notes that name SHAs.</b> One claimed a fix "never landed" and named two SHAs; the fix was on main under different hashes because a cherry-pick re-hashes. Five near-duplicate copies of that fix existed across lanes and nobody could name the canonical one without <code>merge-base</code> (<code>ASTRA-DOCS-UNFUCK.md</code>).</p>
+<p><b>Stale primaries and worktree sprawl.</b> The streaming primary sat on a lane branch 269 behind and 181 dirty; the operator primary on main 395 behind; 44 worktrees needed inspection at the reset (<code>UNSLOP-RESUME.md</code>; <code>reset-20260911/worktree-review.json</code>).</p>
+<p><b>Serialising every landing through a lock on /tmp.</b> The mkdir lock in <code>worktree-for.sh</code> and AGENTS.md rule 2 makes one path the bottleneck; Oracle's own plan retires it for PRs and a merge queue (<code>UNSLOP-RESUME.md</code>, autonomy item 1).</p>
+<p><b>A coordinator that does not check the machine.</b> A raw dev server at 35 GB panicked the host; permission flags that did not take cost seven seat-hours; a send path that silently failed left directives in the composer (token-waste lesson, items 6–8). The team template's <code>az-send</code> already closes the last one.</p>
+
+<h2 id="team">5 · ADOPT into the team template</h2>
+<div class="tbl"><table>
+<tr><th>#</th><th>File in <code>siso-project-team</code></th><th>Change</th></tr>
+<tr><td>1</td><td><code>skills/owner/SKILL.md</code></td><td>Add a "Landing" section: run the project's one verify command on the rebased tip; if main itself fails it, the gate is a ratchet against main's committed baseline; land with one line (does / deliberately does not / breaks if wrong); no reviewer for ordinary diffs.</td></tr>
+<tr><td>2</td><td><code>skills/owner/SKILL.md</code> (Handoff)</td><td>Add "wasted" to the handoff shape: what cost tokens and produced nothing, with the rule that caused it, so the next brief can drop it (Oracle's recap shape).</td></tr>
+<tr><td>3</td><td><code>skills/project-agent-zero/SKILL.md</code></td><td>Replace "ask it for the handoff" polling with the hourly three numbers (commits on main, deploys receipted, ranked rows closed); flat for an hour means the rule is wrong, not the owner; never poll a status command.</td></tr>
+<tr><td>4</td><td><code>skills/project-agent-zero/SKILL.md</code> (Owners)</td><td>Name the only case a second agent reads a diff: a fresh-context cold review for credentials, tokens, wipe paths, deploy scripts and schema, answering SHIP / FIX-FIRST / RETHINK. Nothing else gets a reviewer.</td></tr>
+<tr><td>5</td><td><code>skills/worker-contract/SKILL.md</code></td><td>Add the Sweep job as a worked example: INPUT is the corpus, OUTPUT is one ranked list with a repro per row, CHECK is "every row has a command that reproduces it"; no other agent reads the corpus.</td></tr>
+<tr><td>6</td><td><code>team.yaml</code></td><td>Add <code>verify:</code> (<code>command</code>, <code>baseline</code>, <code>sensitive_paths</code>, <code>human_gate</code> pointing at a SAFETY-GUARDRAILS-style file) and <code>trunk:</code> (<code>max_live_lanes: 3</code>, <code>worktree_root</code>, <code>delete_on_merge: true</code>).</td></tr>
+<tr><td>7</td><td><code>tools/spawn-worker</code></td><td>Make the worktree the only lane: fetch, fork from <code>origin/main</code> into <code>&lt;repo&gt;/.worktrees/&lt;name&gt;</code>, refuse when live lanes reach the cap, delete on merge. Oracle's <code>worktree-for.sh</code> shows the shape and the trap (a hard-coded July branch, a legacy root, a lock on /tmp).</td></tr>
+<tr><td>8</td><td><code>AGENTS.md</code></td><td>Add rule 6: one ledger per kind in the companion (decisions and traps, proven claims, OWNERS.md under 40 lines replaced not appended); no per-unit receipts, ACKs or evidence folders; read the spine, not the corpus.</td></tr>
+<tr><td>9</td><td><code>tools/new-team.sh</code></td><td>Seed the companion team folder with DECISION-LOG.html, PROVEN-LEDGER.html, OWNERS.md and the human-gate file; in each product repo write a gitignored <code>.agents</code> symlink and a nested AGENTS.md under 40 lines, so process files are never tracked twice.</td></tr>
+<tr><td>10</td><td><code>docs/index.html</code> (Build vs not)</td><td>Add three refusals with this page as the evidence link: a reviewer role for ordinary diffs, a second tracker, per-unit receipts.</td></tr>
+</table></div>
+
+<h2 id="labs">6 · ADOPT into SISO Internal Labs</h2>
+<p>Code repo <code>sisodias/siso-internal-labs</code> on the VPS; companion <code>sisodias/siso-internal-labs-agents</code>.</p>
+<div class="tbl"><table>
+<tr><th>#</th><th>Where</th><th>Change</th></tr>
+<tr><td>1</td><td>code repo, <code>scripts/verify.mjs</code> (new)</td><td>One gate with the verify-4-layers contract: JSON per layer, exit 0 / 1 / 2, PARTIAL 3; a committed <code>red-baseline.json</code> written from a clean main on day one so the gate ratchets instead of blocking. The deploy script refuses a build whose gate is not green on <code>HEAD == origin/main</code>.</td></tr>
+<tr><td>2</td><td>companion repo, root</td><td>OWNERS.md under 40 lines (replace rows), DECISION-LOG.html, PROVEN-LEDGER.html seeded from what shipped on 2026-09-11 with the screenshot path and release id per row. The code repo keeps AGENTS.md under 120 lines, <code>CLAUDE.md</code> = <code>@AGENTS.md</code>, and nothing dated.</td></tr>
+<tr><td>3</td><td>code repo, <code>.github/workflows/</code></td><td>One workflow on <code>pull_request</code>, <code>push: branches: [main]</code> and <code>merge_group</code>, one aggregate required job, path filters, tests near the change on the PR and the full suite nightly. Never <code>push: {}</code>; the budget is the free 2,000 minutes a month.</td></tr>
+<tr><td>4</td><td>code repo, <code>.gitignore</code> + <code>.agents</code></td><td>The companion is a symlink at <code>.agents</code> and gitignored, so it can never be tracked in two repos and diverge the way Oracle's did.</td></tr>
+<tr><td>5</td><td>companion repo, <code>AGENT-ZERO-STATE.md</code></td><td>Freeze the append habit: COMPACT.md rewrites it under 120 lines, dated snapshots go to a <code>snapshots/</code> folder, the owner table lives only in OWNERS.md.</td></tr>
+<tr><td>6</td><td><code>siso-harness-lab</code> (filed, per AGENTS.md)</td><td>SessionStart stays routing-only plus one telemetry line: commits landed today, oldest open lane age, worktree count, gate status. Anything longer is a page on the docs path, not hook output.</td></tr>
+</table></div>
+
+<h2 id="ev">Evidence</h2>
+<p>Three files the brief named at the product-repo root do not exist there. <code>ASTRA-DOCS-UNFUCK.md</code>, <code>unfuck-20260905/MASTER.md</code> and <code>A0-STATE.md</code> all live under <code>.agents/briefs/</code> in the companion repo and were read from there. The primary checkout's <code>docs/DECISION-LOG.html</code> is stale (newest entry 2026-08-29, branch <code>lane/multi-model-20260829</code>); the entries cited above were read from <code>origin/main</code> with <code>git show</code>. Counts marked "2026-09-11" were taken from the primary checkout on that date.</p>
+<ul>
+<li><code>SISO_Agency/apps/oracle-companions/agents/briefs/UNSLOP-RESUME.md</code></li>
+<li><code>SISO_Agency/apps/oracle-companions/agents/briefs/ASTRA-DOCS-UNFUCK.md</code> (sections "The measured problem", "Diagnosis and plan — 2026-09-11")</li>
+<li><code>SISO_Agency/apps/oracle-companions/agents/briefs/unfuck-20260905/MASTER.md</code>, <code>COLD-REVIEW.md</code>, <code>BROKEN.md</code>, <code>recaps/</code></li>
+<li><code>SISO_Agency/apps/oracle-companions/agents/briefs/A0-STATE.md</code>, <code>reset-20260911/worktree-review.json</code></li>
+<li><code>SISO_Agency/apps/oracle-companions/agents/memory/unslop-research-sources-20260911.md</code></li>
+<li><code>SISO_Agency/apps/oracle-companions/agents/OWNERS.md</code>, <code>README.md</code>, <code>PAGE.md</code>, <code>repos.json</code></li>
+<li><code>SISO_Agency/apps/oracle-streaming/docs/DECISION-LOG.html</code> and <code>docs/PROVEN-LEDGER.html</code> at <code>origin/main</code>; <code>docs/SAFETY-GUARDRAILS.html</code></li>
+<li><code>SISO_Agency/apps/oracle-streaming/scripts/fleet/verify-4-layers.mjs</code>, <code>scripts/fleet/worktree-for.sh</code>, <code>scripts/session-onramp.mjs</code>, <code>scripts/branch-hygiene.mjs</code></li>
+<li><code>SISO_Agency/apps/oracle-streaming/CLAUDE.md</code>, <code>AGENTS.md</code>, <code>.claude/settings.json</code>, <code>.claude/hooks/</code>, <code>.claude/skills/</code>, <code>.claude/agents/</code>, <code>.codex/skills/</code>, <code>.github/workflows/</code> at <code>origin/main</code></li>
+<li><code>SISO_Agents/siso-harness-lab/docs/lessons/2026-09-06-oracle-fleet-token-waste.md</code></li>
+<li><code>SISO_Agents/siso-harness-lab/reports/2026-09-08-economical-reset/README.md</code></li>
+<li><code>SISO_Agents/siso-harness-lab/reports/2026-09-claude-reramp/01-transcript-audit.md</code>, <code>06-oracle-skills-classification.md</code></li>
+<li><code>SISO_Agency/siso-internal-labs-server/docs/ORACLE-DOMAIN-MODEL.md</code>, <code>PROJECT-ESTATE.md</code> (HALO row)</li>
+<li><code>SISO_Agents/siso-project-team/AGENTS.md</code>, <code>team.yaml</code>, <code>skills/*/SKILL.md</code>, <code>tools/</code>, <code>docs/index.html</code></li>
+</ul>
+<div class="sub">2026-09-11 · read by Claude Fable 5.1, working as a sub-agent of the SISO Internal Labs Project Agent Zero session. Read-only in every Oracle repo; no agent messaged; no worktree touched.</div>
+</body></html>

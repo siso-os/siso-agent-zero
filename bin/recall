@@ -16,14 +16,18 @@ then superseded history last.
 import glob, json, os, re, sys
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from a0_data_home import resolve_data_home, resolve_agent_home
+
+DATA_HOME = str(resolve_data_home()) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
+PRIVATE_HOME = os.environ.get("A0_PRIVATE_HOME", os.path.expanduser("~/.local/state/a0/private"))
 LAYERS = [
     ("his words (chat)", [".agents/a0/transcript/raw/*.jsonl"]),
     ("his words (memos)", ["words/source/*.md", "words/*.md"]),
     ("his words (in projects)", ["@.agents/a0/transcript/project-sources.txt"]),
-    ("memory", [".agents/memory/*.md"]),
+    ("memory", [str(resolve_agent_home(DATA_HOME) / "memory/*.md")]),
     ("state", ["routing.json", "projects.json", "bin/renewals.json"]),
-    ("checkpoint", [".agents/HANDOFF.md"]),
+    ("checkpoint", [str(resolve_agent_home(DATA_HOME) / "HANDOFF.md")]),
     ("map and principles", ["AGENTS.md", "PRINCIPLES.md", "docs/HOW-TO-WORK-WITH-AGENT-ZERO.md", "docs/HOUSE.md", "docs/ELON-PASS.md"]),
     ("research", ["research/*/FINDINGS.md", "research/*/*.md"]),
     ("docs", ["docs/maps/*.md", "docs/evidence/**/*.md"]),
@@ -52,6 +56,9 @@ def variants(term, table):
 
 
 def files_for(pat):
+    raw = pat[1:] if pat.startswith("@") else pat
+    if raw.startswith(".agents/a0/transcript/"):
+        pat = ("@" if pat.startswith("@") else "") + os.path.join(PRIVATE_HOME, raw[len(".agents/a0/"):])
     if pat.startswith("@"):  # a list of paths written by `a0-transcript build --all` (globbing the whole estate takes ~30 s)
         try:
             return [l.strip() for l in open(os.path.join(DATA_HOME, pat[1:])) if l.strip()]

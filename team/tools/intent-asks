@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""intent-asks — how many times, and when, the human has asked for something.
+
+  intent-asks --team <slug> [--intent-dir DIR] <keyword> [<keyword>...]
+
+Reads teams/<team>/intent/*.md (or --intent-dir) and prints, per keyword: the count of
+messages that mention it, first and last date, and the file ids. A thing asked twice is a
+thing an owner may not leave "not started" without Agent Zero's line saying why.
+"""
+import argparse, glob, os, re, sys
+HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
+
+def entries(intent_dir):
+    for p in sorted(glob.glob(os.path.join(intent_dir, "*.md"))):
+        s = open(p, errors="ignore").read()
+        m = re.match(r"---\n(.*?)\n---\n\n?(.*)\Z", s, re.S)
+        when = re.search(r"^when: (\S+)", m.group(1), re.M).group(1)[:16] if m else ""
+        yield os.path.basename(p), when, (m.group(2) if m else s)
+
+def asks(intent_dir, keyword):
+    rx = re.compile(re.escape(keyword), re.I)
+    return [(name, when) for name, when, body in entries(intent_dir) if rx.search(body)]
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--team", required=True); ap.add_argument("--intent-dir")
+    ap.add_argument("keywords", nargs="+"); a = ap.parse_args()
+    d = a.intent_dir or os.path.join(ROOT, "teams", a.team, "intent")
+    # An EMPTY or missing intent dir used to print "asked 0 times" for every keyword, which reads
+    # as an answer rather than a failure -- and those counts go straight into briefs, where "never
+    # asked" is a claim about Shaan. The default path exists on this box but holds no intent; the
+    # real log lives in the team's companion repo and is passed with --intent-dir. Fail loudly.
+    if not glob.glob(os.path.join(d, "*.md")):
+        print(f"intent-asks: no *.md in {d} -- this is NOT 'asked 0 times'. "
+              f"Point --intent-dir at the team's intent log.", file=sys.stderr)
+        sys.exit(2)
+    # ALWAYS print the denominator. The guard above only catches a wholly empty directory, and the
+    # real failure on this box was subtler: teams/<team>/intent/ holds ONE file while the team's
+    # actual log holds 202, so a bare "asked 0 times" was both wrong and unfalsifiable. Saying what
+    # was searched makes a wrong answer visibly wrong.
+    scope = f"(searched {len(glob.glob(os.path.join(d, '*.md')))} files in {d})"
+    for k in a.keywords:
+        hits = asks(d, k)
+        if not hits: print(f"{k}: asked 0 times {scope}"); continue
+        print(f"{k}: asked {len(hits)} times · first {hits[0][1]} · last {hits[-1][1]} · " + " ".join(h[0][:-3] for h in hits) + f" {scope}")
+
+if __name__ == "__main__": main()

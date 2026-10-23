@@ -19,7 +19,10 @@ Agent Zero decided they mean. Nothing pings the builder: it runs `ask queue <OWN
 import argparse, datetime, json, os, re, subprocess, sys
 from pathlib import Path
 
-HOME = Path(os.environ.get("A0_DATA_HOME", Path.home() / "SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if (Path(__file__).resolve().parents[3] / ".siso").is_dir() else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from a0_data_home import resolve_data_home
+
+HOME = resolve_data_home() if (Path(__file__).resolve().parents[3] / ".siso").is_dir() else Path(__file__).resolve().parent.parent
 TASKS = HOME / "tasks"
 ASKS = HOME / "asks"
 A0TASK = Path(__file__).resolve().parent / "a0-task"

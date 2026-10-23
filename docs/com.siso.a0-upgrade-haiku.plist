@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.siso.a0-upgrade-haiku</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/shaansisodia/SISO_Workspace/_data/worktrees/siso/live/agents/zero/bin/a0-review</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/shaansisodia/.local/state/a0/a0-upgrade-haiku.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/shaansisodia/.local/state/a0/a0-upgrade-haiku.log</string>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/shaansisodia</string>
+</dict>
+</plist>

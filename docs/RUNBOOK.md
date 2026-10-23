@@ -2,6 +2,33 @@
 
 Every command here was run and checked on 6 Oct 2026. The why is in `docs/adr/`; this file is the how. Paths are relative to this repo unless they start with `~`. When a command stops working, fix it here the same turn.
 
+## Teams, owners, asks and returns (A53, 21 Oct 2026)
+
+`bin/a0 board --json` is the full reconciliation view. It enumerates `teams`, `owners`,
+`child_runs`, every canonical `ask` (including attended and closed ones), `dispatches`
+and `receipts`. The compact text board shows their counts. `--since` controls the
+wake summary only; it never removes asks or historical receipts from reconciliation.
+
+Dispatch IDs derive from the existing append-only dispatch records. Each dispatch
+keeps its parent, thread, task IDs, receipt ID and outcome; `missing-return` remains
+visible until an exactly correlated receipt arrives. Owner entries link asks and
+dispatches. Child runs include Codex metadata, recorded subagent dispatches and local
+SISO Code run/lineage metadata under dispatched threads. No transcript scan is used.
+`coverage` names missing stores, unreadable tasks and unavailable child-run metadata;
+a missing store is not evidence that no work ran there. This is a local-store view,
+not a claim that remote machines have been fully mirrored.
+
+After dispatch, the existing `a0-await SEAT` background waiter now publishes its
+completed, blocked and needs-input observations into the existing events ledger and
+canonical task-event sidecar. Its exit remains the automatic wake. Receipts carry
+thread/run/dispatch/task identifiers and an outcome, never copied prompts or private
+seat text. Duplicate observations are idempotent. A newer send or replacement thread
+cannot consume an old run's receipt; uncorrelatable historical work remains
+`missing-return` for reconciliation. A receipt reports an observed owner outcome;
+it does not mark its task live or prove deployment.
+
+Initial audit and checks: [A53 reconciliation](audits/a53-t0691.md).
+
 ## After a compaction (boot, about 2 minutes)
 1. Read `AGENTS.md` → **Now**, then the five ADRs (`docs/adr/`, short), then the top entry of `.agents/HANDOFF.md`.
 2. `bin/owners`: who is running, at what context, and their latest link.
@@ -68,7 +95,7 @@ Every command here was run and checked on 6 Oct 2026. The why is in `docs/adr/`;
   ```
 - **A shared file with others' uncommitted lines** (like AGENTS.md): apply my edit to `git show HEAD:file` as well, `git hash-object -w` it, then `git update-index --cacheinfo` in the temp index.
 - **Never a bare `git reset`.** It cleared the whole index once.
-- **Push my own repo:** `git push origin HEAD:main`. On non-fast-forward, rebuild on `origin/main` through the temp index. Products go through PRs.
+- **Put work on main:** commit on a work branch, `bin/land --prove` (runs the affected checks and stores a proof per command), then `bin/land` (verifies the proofs, about 6 s). Prove rebases onto main first, so its proofs match what land checks; a proof miss on a suite slower than the land bound exits 7 naming the package and why: prove again. Land exits: 2 usage or dirty tree, 3 fetch, 4 conflict, 5 check failed, 7 slow proof miss, 8 secrets, 9 private path, 10 checkout drift, 124/125 environment or timeout. Never `git push origin HEAD:main`. Products go through PRs.
 
 ## This Bash tool's quirks
 - `grep`, `find` and `stat` are broken shell functions here: use `/usr/bin/grep`, `/usr/bin/find`, `/usr/bin/stat`.
@@ -83,4 +110,5 @@ Every command here was run and checked on 6 Oct 2026. The why is in `docs/adr/`;
   - camoufox (`camofox-browser` on :9377, `/tabs`, `/pressure/cleanup`);
   - the `tsc`/`vitest` checks;
   - the Claude SDK binaries (60–260 MB per chat).
+- Builder slots are held by a flock on each slot file (`agents/harness/bin/builder_local.py`). Test the lock before calling a slot bug; `lsof` also lists paused builders (21 Oct: a flock test showed the slots were honest).
 - FLEET-COST owns making this cheap (`_data/fleet-cost/`).
