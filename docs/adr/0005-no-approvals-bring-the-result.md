@@ -35,7 +35,7 @@ Approval steps cost time, and they got missed: AGENT-BASE held two finished roun
    - never message anyone as him;
    - never open URLs on his screen;
    - no force-push or deletes (archive instead);
-   - Cam's code stays in Cam's repo.
+   - Cam's code stays in Cam's repo. (superseded 23 Oct 2026, Shaan: the CRM is HALO code in HALO-AGENCY/halo)
 
 ## Consequences
 - Briefs drop "when Shaan says ship". Owners ship and show.

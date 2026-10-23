@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""a0-upgrade: Agent Zero upgrades itself on the side, through Haiku, with no merge chores.
+"""a0-upgrade: any seat upgrades its own skills, tools and hooks on the side, through Haiku, with no merge chores.
 
 Shaan, 17 Oct: "any cool idea he has on Opus he can just get a Haiku 5.5 to upgrade, upgrade, upgrade on the side ...
 sometimes I have to approve them, sometimes if he just does them if he thinks it's clear-cut improvement".
@@ -8,8 +8,13 @@ Flow: A0 files an idea (`add`), hands the id to an `upgrader` Haiku sub-agent in
 upgrader works in its own worktree off origin/main (never in a checkout with other agents' dirty files), runs one check,
 and `ship`s: a clear-cut (auto) upgrade is merged at once and pulled into the live checkout; an `ask` upgrade stays an
 open PR that A0 names to Shaan in one line, and `approve` merges it when he says so.
+Any owner seat uses the same loop (Shaan, 23 Oct: "the owners can actually improve their own skills and their systems so
+it is almost self iterating on Haikus"): `--seat` names who filed it, `--area` the monorepo folder it touches.
 
-  a0-upgrade add "IDEA" --why "EVIDENCE" [--repo firstmate|agent-zero] [--ask]   file an upgrade; prints its id
+  a0-upgrade add "IDEA" --why "EVIDENCE" [--seat NAME] [--area PATH] [--ask]   file an upgrade; prints its id
+                                            (seat: $A0_SEAT, else agent-zero in agents/zero, else the cwd's name;
+                                             area: monorepo folder, default agents/zero; the check runs there)
+  a0-upgrade ingest [--limit 3] [--dry-run] [SOURCE ...]  file lessons into the same upgrade store
   a0-upgrade start ID                       make its worktree (prints the path the upgrader edits)
   a0-upgrade ship ID --check "CMD"          run CMD in the worktree, commit, PR; auto: merge + pull; ask: leave open
   a0-upgrade approve ID                     merge an ask upgrade Shaan agreed to, pull it live
@@ -18,18 +23,21 @@ open PR that A0 names to Shaan in one line, and `approve` merges it when he says
   a0-upgrade brief                          3-part status for after a compaction: seats not ok, open upgrades, last sends
   a0-upgrade log [--out PATH]               regenerate docs/upgrades/LOG.md: every upgrade, its why, status and verdict
   a0-upgrade verdict ID good|bad|pending --note TEXT [--out PATH]   store Shaan's verdict, then regenerate the log
+  a0-upgrade week [--weeks 4]               per ISO week: upgrades filed/shipped per seat, and skill/tool/hook commits
+                                            on main by subject prefix (the self-improvement check)
 
 Auto = A0's own skills' wording, a new or fixed check in A0's own tools (its check passes), logs, Haiku agent prompts.
 Ask  = anything Shaan sees or does differently, a seat he is working with, model or spend routing, a safety rule, or
        removing a rule. The upgrader may move auto -> ask, never ask -> auto.
 """
-import json, os, subprocess, sys, time
+import datetime, json, os, subprocess, sys, time, hashlib, fcntl, re, shutil
 from pathlib import Path
 
 HOME = Path.home()
 WS = HOME / "SISO_Workspace"
 REPOS = {
-    "firstmate": WS / "SISO_Agents/agent-zero/siso-firstmate",
+    # siso-firstmate joined sisodias/siso agents/zero (t-0618); old rows keep working.
+    "firstmate": WS / "_data/worktrees/siso/main",
     "agent-zero": WS / "_data/worktrees/siso/main",
 }
 STATE = Path(os.environ.get("A0_UPGRADES_FILE", HOME / ".local/state/a0/upgrades.jsonl"))
@@ -87,7 +95,7 @@ def flag(args, key, default=None):
 
 
 def wt_path(r):
-    return WS / "_data/worktrees" / ("siso" if r["repo"] == "agent-zero" else REPOS[r["repo"]].name) / f"upgrade-{r['id']}"
+    return WS / "_data/worktrees" / ("siso" if REPOS[r["repo"]] == REPOS["agent-zero"] else REPOS[r["repo"]].name) / f"upgrade-{r['id']}"
 
 
 def pull_live(repo, paths):
@@ -96,9 +104,12 @@ def pull_live(repo, paths):
     each file this upgrade changed is taken from origin/main on its own, but only if that file is clean here.
     An untracked copy byte-identical to origin/main counts as clean: it is replaced by the tracked copy."""
     if repo == REPOS["agent-zero"]:
-        sh([str(repo / "bin/siso"), "sync"], cwd=repo)
+        sync = sh([str(repo / "bin/siso"), "sync"], cwd=repo, check=False)
+        if sync.returncode not in (0, 4):
+            sys.exit(f"monorepo sync failed ({sync.returncode}); live unchanged")
+        # Exit 4 retains dirty authoring files; live independently checks landed ancestry and edits.
         sh([str(repo / "bin/siso"), "live"], cwd=repo)
-        return "synced monorepo and live"
+        return "live published; authoring sync held (dirty files preserved)" if sync.returncode == 4 else "synced monorepo and live"
     p = sh(["git", "pull", "--no-rebase", "--no-edit", "-q", "origin", "main"], cwd=repo, check=False)
     if p.returncode == 0:
         return "pulled live"
@@ -132,17 +143,101 @@ def gh_repo(cwd):
 
 
 def cmd_add(a):
-    why, repo, ask = flag(a, "--why", ""), flag(a, "--repo", "firstmate"), "--ask" in a
+    why, repo, ask = flag(a, "--why", ""), flag(a, "--repo", "agent-zero"), "--ask" in a
+    seat = flag(a, "--seat") or default_seat()
+    area = (flag(a, "--area") or "agents/zero").strip("/")
+    if area.startswith(("/", ".")) or ".." in area.split("/"):
+        sys.exit("--area is a folder inside the monorepo, for example agents/skills/hub")
     a = [x for x in a if x != "--ask"]
     if len(a) != 1 or not why:
-        sys.exit('a0-upgrade add "IDEA" --why "EVIDENCE" [--repo firstmate|agent-zero] [--ask]')
+        sys.exit('a0-upgrade add "IDEA" --why "EVIDENCE" [--seat NAME] [--area PATH] [--ask]')
     if repo not in REPOS:
-        sys.exit(f"repo must be one of {', '.join(REPOS)} (Agent Zero upgrades only itself)")
-    n = len(current()) + 1
-    uid = f"u{n:03d}"
-    put({"id": uid, "idea": a[0], "why": why, "repo": repo, "class": "ask" if ask else "auto", "status": "queued"})
+        sys.exit(f"repo must be one of {', '.join(REPOS)} (the monorepo; pick the folder with --area)")
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with STATE.with_suffix('.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        n = max([int(k[1:]) for k in current() if re.fullmatch(r'u[0-9]+', k)] or [0]) + 1
+        uid = f"u{n:03d}"
+        put({"id": uid, "idea": a[0], "why": why, "repo": repo, "class": "ask" if ask else "auto", "status": "queued",
+             "seat": seat, "area": area})
     print(uid)
     print(f'Next: Agent(subagent_type: "upgrader", run_in_background: true, prompt: "Upgrade {uid}.")')
+
+
+def default_seat():
+    if os.environ.get("A0_SEAT"):
+        return os.environ["A0_SEAT"]
+    cwd = Path.cwd()
+    return "agent-zero" if "agents/zero" in str(cwd) else cwd.name
+
+
+def area_of(r):
+    return r.get("area") or "agents/zero"
+
+
+def normalized_idea(text):
+    text = re.sub(r'^\s*(?:[-*]\s*)?(?:\[)?\d{4}-\d{2}-\d{2}(?:\])?\s*[:—-]?\s*', '', text)
+    return ' '.join(re.findall(r'\w+', text.casefold()))
+
+
+def lesson_why(c):
+    targets = re.findall(r'(?:[\w.~-]+/)+[\w.-]+|[\w.-]+\.(?:py|js|mjs|ts|md|sh|json)\b', c['lesson'])
+    target = '; target: ' + ', '.join(dict.fromkeys(targets)) if targets else ''
+    return f"Final lesson evidence: {c['source']}:{c['line']}{target}; check existing fixes and scope before editing."
+
+
+def lesson_candidates(paths):
+    """Final corrections only. Keep payloads in the existing private upgrade store, never in git."""
+    for path in paths:
+        path = Path(path).expanduser()
+        if not path.is_file(): continue
+        for n, raw in enumerate(path.read_text(errors='replace').splitlines(), 1):
+            lessons = []
+            if path.suffix == '.jsonl':
+                try: row = json.loads(raw)
+                except ValueError: continue
+                lessons = row.get('lessons') or row.get('learned') or []
+                if isinstance(lessons, str): lessons = [lessons]
+            elif path.name == 'LEDGER.md':
+                if re.search(r'2026-10-2[01]|21 Oct', raw): lessons = [raw.strip('- ')]
+            elif path.name == 'FINDINGS.md':
+                if raw.startswith(('- ', '## ')): lessons = [raw.strip('#- ')]
+            elif re.match(r'(?i)\s*(?:[-*] )?(?:learned|lesson[s]?):', raw):
+                lessons = [raw.split(':', 1)[1].strip()]
+            for lesson in lessons:
+                if not isinstance(lesson, str) or len(lesson.strip()) < 15: continue
+                if lesson.strip().lower() in ('not reported', 'none recorded', 'unknown'): continue
+                key = hashlib.sha256(' '.join(lesson.split()).encode()).hexdigest()
+                yield dict(source=str(path), line=n, lesson=lesson.strip(), source_key=key)
+
+
+def cmd_ingest(a):
+    """File bounded, idempotent upgrade candidates into the existing store; no new queue."""
+    limit = int(flag(a, '--limit', '3'))
+    dry = '--dry-run' in a
+    a = [x for x in a if x != '--dry-run']
+    paths = a or [str(WS / '.agents/lessons/LEDGER.md'), str(WS / '.agents/teams/IMPROVE.jsonl'),
+                  str(WS / '.agents/events.jsonl'), str(BIN.parent.parent / 'harness/tokens/FINDINGS.md')]
+    if not 1 <= limit <= 100: sys.exit('--limit must be 1..100')
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with STATE.with_suffix('.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        active = [r for r in current().values() if r.get('status') in ('queued', 'working', 'merged')]
+        known = {normalized_idea(r.get(field, '')) for r in active for field in ('idea', 'lesson')}
+        candidates = list(lesson_candidates(paths))
+        filed = []
+        for c in sorted(candidates, key=lambda x: (Path(x['source']).stat().st_mtime, x['line']), reverse=True):
+            key = normalized_idea(c['lesson'])
+            if key in known: continue
+            known.add(key)
+            uid = f"u{max([int(k[1:]) for k in current() if re.fullmatch(r'u[0-9]+', k)] or [0]) + 1:03d}"
+            if not dry:
+                put(dict(id=uid, idea=c['lesson'],
+                    why=lesson_why(c),
+                    repo='agent-zero', **{'class': 'auto'}, status='queued', needs_scope_review=True, **c))
+            filed.append(dict(id=None if dry else uid, source=c['source'], line=c['line'], source_key=c['source_key']))
+            if len(filed) >= limit: break
+        print(json.dumps(dict(filed=filed, dry_run=dry, candidates=len(candidates))))
 
 
 def cmd_start(a):
@@ -151,10 +246,32 @@ def cmd_start(a):
     if not wt.exists():
         sh(["git", "fetch", "-q", "origin", "main"], cwd=repo)
         wt.parent.mkdir(parents=True, exist_ok=True)
-        sh(["git", "worktree", "add", "-q", "-b", f"a0-upgrade/{r['id']}", str(wt), "origin/main"], cwd=repo)
+        # Sparse: a full monorepo checkout is ~3 GiB per upgrade on the laptop (22 Oct, laptop at 10 GiB free).
+        sh(["git", "worktree", "add", "-q", "--no-checkout", "-b", f"a0-upgrade/{r['id']}", str(wt), "origin/main"], cwd=repo)
+        sh(["git", "sparse-checkout", "set", "--cone", *dict.fromkeys(["agents", "bin", area_of(r).split("/")[0]])], cwd=wt)
+        sh(["git", "checkout", "-q"], cwd=wt)
         put({"id": r["id"], "status": "working", "worktree": str(wt)})
-    print(json.dumps({"id": r["id"], "worktree": str(wt / "agents/zero" if r["repo"] == "agent-zero" else wt), "idea": r["idea"], "why": r["why"], "class": r["class"]},
+    print(json.dumps({"id": r["id"], "worktree": str(wt / area_of(r) if REPOS[r["repo"]] == REPOS["agent-zero"] else wt), "idea": r["idea"], "why": r["why"], "class": r["class"], "lesson": r.get("lesson"), "source": r.get("source"), "needs_scope_review": r.get("needs_scope_review", False)},
                      ensure_ascii=False))
+
+
+def stage_changes(wt):
+    # -z preserves spaces/newlines; renames include a second (original) path.
+    records = sh(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], cwd=wt).stdout.split('\0')
+    paths, i = [], 0
+    while i < len(records):
+        record = records[i]
+        i += 1
+        if not record: continue
+        paths.append(record[3:])
+        if 'R' in record[:2] or 'C' in record[:2]:
+            if record[0] != 'R': paths.append(records[i])
+            i += 1
+    private = re.compile(r'(^|/)(secrets|\.credentials|personal)/|(^|/)[^/]*\.env$|(^|/)\.env(\.[^/]*)?$')
+    if any(private.search(p) for p in paths):
+        sys.exit('private-guard: REFUSED upgrade changes to private/secret paths')
+    if paths:
+        sh(['git', '--literal-pathspecs', 'add', '-A', '--', *dict.fromkeys(paths)], cwd=wt)
 
 
 def cmd_ship(a):
@@ -163,12 +280,12 @@ def cmd_ship(a):
     wt = wt_path(r)
     if not check or not wt.exists():
         sys.exit("a0-upgrade ship ID --check CMD (after start)")
-    module = wt / "agents/zero" if r["repo"] == "agent-zero" else wt
+    module = wt / area_of(r) if REPOS[r["repo"]] == REPOS["agent-zero"] else wt
     c = subprocess.run(check, shell=True, cwd=module, text=True, capture_output=True)
     if c.returncode:
         put({"id": r["id"], "status": "check-failed", "check": check, "out": (c.stdout + c.stderr)[-400:]})
         sys.exit(f"check failed; nothing shipped:\n{(c.stdout + c.stderr)[-800:]}")
-    sh(["git", "add", "-A", "--", "agents/zero"] if r["repo"] == "agent-zero" else ["git", "add", "-A"], cwd=wt)
+    stage_changes(wt)
     staged = sh(["git", "diff", "--cached", "--quiet"], cwd=wt, check=False).returncode != 0
     ahead = sh(["git", "rev-list", "--count", "origin/main..HEAD"], cwd=wt, check=False).stdout.strip() != "0"
     if not staged and not ahead:
@@ -197,23 +314,67 @@ def open_pr(r, wt, check):
     merge(r, url, wt)
 
 
+SKILLS_HOME = HOME / ".agents/skills"
+ARCHIVE = HOME / ".agents/_archive"
+
+
+def refresh_installed(paths, src, rid):
+    """Bring the installed copy of each skill this upgrade changed up to date, so every seat runs the upgraded skill, not
+    only the project that holds its source (BRAVE index, 23 Oct: home copies of a0-dispatch, job-brief, research-fleet
+    and land lagged their landed upgrades by two days). Links follow source by themselves; copies are archived first."""
+    out, seen = [], set()
+    for p in paths:
+        parts = p.split("/")
+        if p.startswith("agents/skills/hub/registry/skills/") and len(parts) > 7:
+            kind, sid = "hub", parts[6]
+        elif p.startswith("agents/zero/.claude/skills/") and len(parts) > 5:
+            kind, sid = "zero", parts[4]
+        else:
+            continue
+        dst = SKILLS_HOME / sid
+        if sid in seen or dst.is_symlink() or not (dst / "SKILL.md").is_file():
+            continue
+        seen.add(sid)
+        if kind == "hub":
+            c = sh([sys.executable, "scripts/skills", "install", sid, "--target", str(SKILLS_HOME), "--refresh"], cwd=src / "agents/skills/hub", check=False)
+            out.append(sid if c.returncode == 0 else f"{sid} (refresh refused {c.returncode})")
+            continue
+        new = src / "agents/zero/.claude/skills" / sid
+        if f"name: {sid}" not in (dst / "SKILL.md").read_text() or not (new / "SKILL.md").is_file():
+            continue
+        arch = ARCHIVE / f"skills-refresh-{datetime.date.today():%Y%m%d}" / f"{sid}-{rid}"
+        arch.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dst), str(arch))
+        shutil.copytree(new, dst)
+        out.append(sid)
+    return out
+
+
 def merge(r, url, wt):
     # Outside any checkout: inside one, gh tries to switch to main, which the live checkout holds.
     st = sh(["gh", "pr", "view", url, "--json", "state", "-q", ".state"], cwd="/tmp").stdout.strip()
     if st != "MERGED":
         sh(["gh", "pr", "merge", url, "--squash", "--delete-branch"], cwd="/tmp")
-    live = pull_live(REPOS[r["repo"]], get(r["id"]).get("paths", []))
+    put({"id": r["id"], "status": "merged", "pr": url})  # merged on main now, even if the live sync below refuses (u324)
+    if wt.exists() and (skills := refresh_installed(get(r["id"]).get("paths", []), wt, r["id"])):
+        put({"id": r["id"], "skills_refreshed": skills})
+    # The change is on main now: clear its worktree (a dirty one is refused and kept) before a live-sync refusal can strand it.
     sh(["git", "worktree", "remove", str(wt)], cwd=REPOS[r["repo"]], check=False)
     sh(["git", "branch", "-q", "-D", f"a0-upgrade/{r['id']}"], cwd=REPOS[r["repo"]], check=False)
     sh(["git", "push", "-q", "origin", "--delete", f"a0-upgrade/{r['id']}"], cwd=REPOS[r["repo"]], check=False)
+    live = pull_live(REPOS[r["repo"]], get(r["id"]).get("paths", []))
     put({"id": r["id"], "status": "merged", "pr": url, "live": live})
     print(f"{r['id']} merged ({url}); {live}")
 
 
 def cmd_approve(a):
     r = get(a[0])
-    if not r.get("pr"):
-        sys.exit(f"{r['id']} has no PR yet")
+    if not r.get("pr"):  # a ship stopped after opening its PR: find it by branch
+        found = sh(["gh", "pr", "list", "--repo", "/".join(gh_repo(REPOS[r["repo"]])), "--head", f"a0-upgrade/{r['id']}", "--state", "all",
+                    "--json", "url,state", "-q", '[.[] | select(.state != "CLOSED")][0].url // ""'], cwd="/tmp", check=False).stdout.strip()
+        if not found:
+            sys.exit(f"{r['id']} has no PR yet")
+        r["pr"] = found
     merge(r, r["pr"], wt_path(r))
 
 
@@ -292,14 +453,66 @@ def cmd_verdict(a):
     cmd_log(["--out", out] if out else [])
 
 
+IMPROVE_PATHS = ["*SKILL.md", "agents/skills", "agents/harness/hooks", "agents/harness/stack/profiles/agents", "*/bin/*", "bin"]
+SHIPPED = {"merged"}
+
+
+def week_of(ts):
+    y, w, _ = datetime.date.fromisoformat(ts[:10]).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def week_table(records, commits, weeks):
+    """records: the store's lines in order; commits: (iso date, subject). Pure, for tests."""
+    first, shipped = {}, {}
+    for r in records:
+        first.setdefault(r["id"], r)
+        if r.get("status") in SHIPPED and r["id"] not in shipped:
+            shipped[r["id"]] = r.get("at", "")
+    out = {}
+    for uid, r in first.items():
+        seat = r.get("seat") or "agent-zero"
+        if r.get("at"):
+            out.setdefault(week_of(r["at"]), {}).setdefault(seat, [0, 0, 0])[0] += 1
+        if shipped.get(uid):
+            out.setdefault(week_of(shipped[uid]), {}).setdefault(seat, [0, 0, 0])[1] += 1
+    for day, subject in commits:
+        m = re.match(r"(?:a0-upgrade (u\d+)|([\w./ -]{1,30}?)):", subject)
+        if m and m.group(1):
+            continue  # already counted as shipped above
+        who = (m.group(2).strip() if m else "other")
+        out.setdefault(week_of(day), {}).setdefault(who, [0, 0, 0])[2] += 1
+    return {w: out[w] for w in sorted(out)[-weeks:]}
+
+
+def cmd_week(a):
+    weeks = int(flag(a, "--weeks", "4"))
+    repo = REPOS["agent-zero"]
+    # --first-parent: main's own commits, not the histories imported by the repo cutovers.
+    log = sh(["git", "log", "origin/main", "--first-parent", f"--since={weeks * 7} days ago", "--no-merges", "--format=%cs\t%s", "--", *IMPROVE_PATHS],
+             cwd=repo, check=False).stdout
+    commits = [tuple(l.split("\t", 1)) for l in log.splitlines() if "\t" in l]
+    table = week_table(rows(), commits, weeks)
+    print("week      who                            filed shipped commits   (upgrades by seat; skill/tool/hook commits on main by subject prefix)")
+    for w, by in table.items():
+        ranked = sorted(by.items(), key=lambda kv: (-(kv[1][0] + kv[1][1]), -kv[1][2]))  # seats' upgrades first
+        for who, (f, s, c) in ranked[:12]:
+            print(f"{w}  {who[:30]:30} {f:5} {s:7} {c:7}")
+        if len(ranked) > 12:
+            print(f"{w}  ... {len(ranked) - 12} more, {sum(sum(v) for _, v in ranked[12:])} items")
+
+
 def main():
     a = sys.argv[1:]
     cmd = a.pop(0) if a else "list"
     fn = {"add": cmd_add, "start": cmd_start, "ship": cmd_ship, "approve": cmd_approve, "drop": cmd_drop,
-          "list": cmd_list, "brief": cmd_brief, "log": cmd_log, "verdict": cmd_verdict}.get(cmd)
+          "ingest": cmd_ingest, "list": cmd_list, "brief": cmd_brief, "log": cmd_log, "verdict": cmd_verdict,
+          "week": cmd_week}.get(cmd)
     if not fn:
         sys.exit(__doc__)
     fn(a)
+    if cmd in ("ingest", "add", "ship", "approve", "drop") and "--dry-run" not in sys.argv:
+        cmd_log([])
 
 
 if __name__ == "__main__":

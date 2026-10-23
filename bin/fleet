@@ -28,14 +28,14 @@ from pathlib import Path
 
 STATE = Path(os.environ.get('FLEET_STATE', str(Path.home() / '.local/state/fleet')))
 ROOT = Path.home() / 'SISO_Workspace'
-MINI_FLEET = 'SISO_Agents/agent-zero/siso-agent-zero/bin/fleet'
-CODEX_RUN = str(ROOT / 'SISO_Agents/siso-harness-lab/bin/codex-run')
+MINI_FLEET = '_data/worktrees/siso/live/agents/zero/bin/fleet'
+CODEX_RUN = str(ROOT / '_data/worktrees/siso/live/agents/harness/bin/codex-run')
 if not Path(CODEX_RUN).exists():
     CODEX_RUN = shutil.which('codex-run') or CODEX_RUN
 SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'RemoteCommand=none',
        '-o', 'RequestTTY=no', os.environ.get('FLEET_MINI_HOST', 'shaansisodia@100.66.34.21')]
 GIB = 1024 ** 3
-ENV = dict(os.environ, PATH=str(Path.home() / '.local/bin') + ':/opt/homebrew/bin:' + os.environ.get('PATH', ''))
+ENV = dict({k: v for k, v in os.environ.items() if k not in ('CODEX_RUN_ADMITTED', 'CODEX_RUN_SLOT_FD', 'CODEX_RUN_NAME_FD', 'CODEX_RUN_PREFIX')}, PATH=str(Path.home() / '.local/bin') + ':/opt/homebrew/bin:' + os.environ.get('PATH', ''))
 
 
 def dispatch(kind, name, workspace, parent, machine, brief='', out=''):
@@ -323,13 +323,13 @@ def runner(name):
                 if running >= m['max'] or level != 'normal' or rss > cap + .5 * GIB or planned + reserve(fleets, cap) > cap:
                     break
                 # Only a disk in danger pauses new jobs; running jobs are unaffected.
-                disk_floor_gb = DISK_FLOOR_GB
+                disk_floor_gb = DISK_FLOOR_GB + 3
                 if shutil.disk_usage(os.path.expanduser('~')).free < disk_floor_gb * GIB:
                     m['note'] = f'disk below {disk_floor_gb} GiB free: waiting'
                     break
                 try:
                     d = workdir(m, j)
-                    cmd = [CODEX_RUN, '--as', m['name'] + '/' + j['id'], '--parent', m.get('parent') or 'Agent Zero', '--workspace', m.get('workspace') or '', '-m', j.get('model', m['model']), '--why', m['why'], '-e', m['effort'], '-C', d, j['brief']]
+                    cmd = [CODEX_RUN, '--on', 'laptop', '--as', m['name'] + '/' + j['id'], '--parent', m.get('parent') or 'Agent Zero', '--workspace', m.get('workspace') or '', '-m', j.get('model', m['model']), '--why', m['why'], '-e', m['effort'], '-C', d, j['brief']]
                     p, h = spawn(cmd, d, STATE / name / (j['id'] + '.out'))
                     j['worker'] = m['name'] + '/' + j['id']
                     dispatch('fleet-job', j['worker'], m.get('workspace'), m.get('parent') or 'Agent Zero', 'mini' if m['machine'] == 'mini' else 'laptop', j['brief'], str(STATE / name / (j['id'] + '.out')))

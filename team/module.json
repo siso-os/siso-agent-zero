@@ -1,0 +1,11 @@
+{
+  "id": "siso.agents.team",
+  "kind": "tool",
+  "summary": "A project team in a box: project Agent Zero, ephemeral owners, arms, task spine",
+  "owner": "agent-zero",
+  "tags": [
+    "layer:agents"
+  ],
+  "depends": [],
+  "status": "experimental"
+}

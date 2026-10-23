@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Team v2 — brain, owners, arms</title>
+<style>
+:root{--bg:#faf9f7;--fg:#1a1a1a;--muted:#6b6b6b;--line:#e2e0dc;--card:#fff;--code:#f3f1ee;--brain:#7a5cff;--owner:#0f766e;--arm:#b45309;--bad:#b91c1c;--ok:#15803d}
+@media(prefers-color-scheme:dark){:root{--bg:#11131a;--fg:#e6e6e6;--muted:#9a9aa3;--line:#2a2d36;--card:#181b23;--code:#1f2230}}
+body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Inter,system-ui,sans-serif;max-width:1040px;margin-inline:auto}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:34px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
+.sub{color:var(--muted);margin-bottom:22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h3{margin:0 0 6px;font-size:15px}.card p{margin:6px 0;color:var(--muted)}
+.k{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;padding:2px 7px;border-radius:999px;color:#fff;margin-right:6px}
+.brain{background:var(--brain)}.owner{background:var(--owner)}.arm{background:var(--arm)}.bad{background:var(--bad)}.ok{background:var(--ok)}
+code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:6px}
+code{padding:1px 5px}pre{padding:12px 14px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+svg{max-width:100%;height:auto;display:block;margin:10px auto}
+.svgtxt{font:13px -apple-system,Inter,system-ui,sans-serif;fill:var(--fg)}.svgmut{font:12px -apple-system,Inter,system-ui,sans-serif;fill:var(--muted)}
+.rule{border-left:3px solid var(--brain);padding:6px 12px;margin:10px 0;background:var(--card)}
+</style></head><body>
+<h1>Agent Team v2 — the brain thinks, the owners decide, the arms do</h1>
+<div class="sub">Designed from what actually broke on 2026-09-11, not from a diagram. Every item below names the mechanism that exists today and the smallest change that makes it hold.</div>
+
+<svg viewBox="0 0 980 380" role="img" aria-label="Three tiers: Shaan and console at top, Agent Zero brain, ephemeral Opus owners, Qwen and Luna workers at bottom; Plane and the browser harness as shared spine">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5 0 10z" fill="#9a9aa3"/></marker></defs>
+<rect x="20" y="16" width="940" height="56" rx="10" fill="none" stroke="#e2e0dc"/>
+<text x="40" y="40" class="svgtxt" font-weight="700">Shaan</text>
+<text x="40" y="58" class="svgmut">console cards · decisions · credentials, money, production data — the only three things that wait for him</text>
+<text x="700" y="40" class="svgtxt">Agents tab → AZ, owners, tasks, talk</text>
+<rect x="330" y="100" width="320" height="64" rx="10" fill="#7a5cff" opacity=".12" stroke="#7a5cff"/>
+<text x="350" y="126" class="svgtxt" font-weight="700">Agent Zero — resident, Opus, ONE pane on the VPS</text>
+<text x="350" y="146" class="svgmut">reads Plane · spawns/ends owners · sequences deploys · the only voice to Shaan</text>
+<g>
+<rect x="40" y="210" width="215" height="58" rx="10" fill="#0f766e" opacity=".12" stroke="#0f766e"/><text x="56" y="234" class="svgtxt" font-weight="700">Owner: Health</text><text x="56" y="252" class="svgmut">Opus · ephemeral · brief in → handoff</text>
+<rect x="270" y="210" width="215" height="58" rx="10" fill="#0f766e" opacity=".12" stroke="#0f766e"/><text x="286" y="234" class="svgtxt" font-weight="700">Owner: Tokens</text><text x="286" y="252" class="svgmut">decides · proves in a browser · exits</text>
+<rect x="500" y="210" width="215" height="58" rx="10" fill="#0f766e" opacity=".12" stroke="#0f766e"/><text x="516" y="234" class="svgtxt" font-weight="700">Owner: Life → Postgres</text><text x="516" y="252" class="svgmut">one workload, one owner</text>
+<rect x="730" y="210" width="215" height="58" rx="10" fill="none" stroke="#0f766e" stroke-dasharray="5 4"/><text x="746" y="234" class="svgmut">…as many as the work needs,</text><text x="746" y="252" class="svgmut">none longer than the task</text>
+</g>
+<g>
+<rect x="40" y="306" width="445" height="56" rx="10" fill="#b45309" opacity=".12" stroke="#b45309"/><text x="56" y="330" class="svgtxt" font-weight="700">Arms: Qwen3.8-27B pool — 16 workers, serving since 09:41Z</text><text x="56" y="348" class="svgmut">bounded jobs: convert, grep, draft, bulk-edit, run the harness</text>
+<rect x="500" y="306" width="445" height="56" rx="10" fill="#b45309" opacity=".12" stroke="#b45309"/><text x="516" y="330" class="svgtxt" font-weight="700">Arms: Luna (GPT, Codex plan) when the plan is on</text><text x="516" y="348" class="svgmut">same contract, same brief; the owner picks Qwen or Luna per job</text>
+</g>
+<path d="M490 72 V100" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M490 164 V210" stroke="#9a9aa3" marker-end="url(#a)"/>
+<path d="M147 164 V210" stroke="#9a9aa3" marker-end="url(#a)" fill="none"/><path d="M607 164 V210" stroke="#9a9aa3" marker-end="url(#a)"/>
+<path d="M147 268 V306" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M377 268 V306" stroke="#9a9aa3" marker-end="url(#a)"/><path d="M607 268 V306" stroke="#9a9aa3" marker-end="url(#a)"/>
+<text x="490" y="190" class="svgmut" text-anchor="middle">owners message AZ, never Shaan  ·  AZ posts to the console</text>
+</svg>
+
+<h2>What the last 24 hours proved, and the mechanism that fixes each</h2>
+<table>
+<tr><th>Observed</th><th>Cost</th><th>Mechanism (exists → change)</th></tr>
+<tr><td>Agent Zero died at 00:04 from a hook 400 and nobody noticed for 9 h. He has <b>no pane</b>; he runs headless on the laptop.</td><td>9 h frozen fleet</td><td>herdr already reports <code>agent_status</code> per pane → <b>give AZ one pane on the VPS</b> (<code>w1</code>, cwd <code>/opt/siso-agent-zero</code>). Heartbeat, visibility, addressability in one move.</td></tr>
+<tr><td>Owner reports landed in <b>Shaan's laptop pane</b>: <code>az-notify</code> targets <code>w65b0dbdd91d7811-1</code>, the pane he types in.</td><td>Owners "messaging us"</td><td><code>az-notify</code> exists → retarget it to AZ's VPS pane. Shaan's pane stops being the fleet inbox the same minute.</td></tr>
+<tr><td>Nine owners at 235k–692k context each, resident 15 h, $591 by midday. Real work ended ~02:00.</td><td>Most of the bill</td><td>Owners become <b>ephemeral</b>: brief in (<code>TASK-*.md</code> already exists), definition-of-done a browser can check, handoff file out, <b>exit</b>. Resident context = AZ only.</td></tr>
+<tr><td><b>53</b> ad-hoc Playwright scripts in <code>/tmp/pw</code> since 19:44 yesterday: <b>41</b> read the credential file themselves, <b>53</b> launch their own Chromium, <b>1</b> reuses a saved session.</td><td>Rediscovery, leaked browsers, 5 concurrent chromes</td><td><code>verify-page.mjs</code> + <code>/opt/orca-eval/verifier.env</code> exist → one <code>siso-browse</code> CLI with a <b>persisted storageState</b>: <code>siso-browse shot /siso-crm/health</code>, <code>siso-browse text …</code>, <code>siso-browse click …</code>. Logged in once, reused by owners and arms. Camofox slots in behind the same command later.</td></tr>
+<tr><td>Ten typed-but-unsubmitted dispatches (send-text without Enter, bare Enter on stale lines).</td><td>Hours of "idle" that was actually "never asked"</td><td>One <code>az-send &lt;pane&gt; "…"</code> that clears, types, submits, <b>reads back a spinner</b> and fails loudly. No raw <code>herdr pane send-*</code> in briefs.</td></tr>
+<tr><td>Hand-rolled pointers, a hidden second publisher, hollow releases with exit 0.</td><td>2 min production outage, 3 false alarms</td><td><b>Done today</b> (LABS-16): hollow gate, backwards refusal, last-good pin, per-build outDir, <code>siso-web-publish</code> inert. Remaining: <code>/assets</code> miss must 404 — still returns Twenty's HTML.</td></tr>
+<tr><td>"Are you done?" → nine yeses; two were wrong (Save 403'd, Twenty blocker was never real).</td><td>Trust</td><td>Every brief ends with <b>what a browser must show</b>. The owner ships the screenshot with the claim, through <code>siso-browse</code>, or it is not done.</td></tr>
+</table>
+
+<h2>The three tiers, as rules not vibes</h2>
+<div class="grid">
+<div class="card"><span class="k brain">BRAIN</span><h3>Agent Zero — resident, Opus</h3><p>Lives in one VPS pane. Reads Plane for the project, decides which domains exist, spawns an owner per workload with a brief, sequences deploys, closes owners when their handoff lands. The <b>only</b> agent that speaks to Shaan (console cards, one page with a visual). Mostly idle by design.</p><p>Hard rules: one instance ever (<code>pgrep</code> before resume); heartbeat via herdr status; state in <code>AGENT-ZERO-STATE.md</code>, updated on every decision.</p></div>
+<div class="card"><span class="k owner">OWNERS</span><h3>Domain owners — Opus, ephemeral, autonomous</h3><p>One workload, one owner, full authority inside it: they do not ask permission, they <b>tell AZ what they are doing</b> and go. They message AZ, never Shaan. They decide, verify in a browser, hand off, exit — 20–60k context, not 500k.</p><p>They do not build the arms' work themselves: anything mechanical, bulky or repetitive is dispatched to a worker with a brief and a checkable result.</p></div>
+<div class="card"><span class="k arm">ARMS</span><h3>Workers — Qwen pool, Luna when the Codex plan is on</h3><p>No judgement, no rediscovery. A brief says exactly: files, command, expected output, how to check it. Convert, grep, draft, bulk-edit, run <code>siso-browse</code>, produce the screenshot. Result comes back as a path + a window, never a wall.</p><p>Pool serves today (<code>tools/pool-env --check</code> → ok, 0.32 s). 16 workers now; the owner picks Qwen or Luna per job by one flag.</p></div>
+</div>
+
+<h2>The visual plane — an Agent Zero tab in Agents</h2>
+<p>The Agents surface already exists (<code>/siso-crm/agents</code> = Orca, <code>/siso-crm/herdr</code> = the proven rail). The tab adds four things, all from data that already exists:</p>
+<table>
+<tr><th>Panel</th><th>Source that already exists</th><th>What Shaan sees</th></tr>
+<tr><td><b>Agent Zero</b></td><td>his VPS pane via <code>/herdr-tty/vps/</code> (behind the login)</td><td>talk to him from the site; his last decision; alive/idle/dead</td></tr>
+<tr><td><b>Owners</b></td><td>herdr <code>pane list</code> + <code>agent_status</code>, brief file per pane</td><td>who exists, what each owns, working / idle / blocked, context size, cost</td></tr>
+<tr><td><b>Tasks</b></td><td>Plane work items (18 projects, <code>siso-plane-ops</code> CLI)</td><td>the queue per domain; add a task from the page; AZ picks it up</td></tr>
+<tr><td><b>Shipped</b></td><td>releases + <code>siso-browse</code> screenshots</td><td>what changed on production today, with the picture</td></tr>
+</table>
+<div class="rule">Plane is the task spine. <b>Beads</b> (gastownhall/beads, 27k★, Steve Yegge's local-first agent issue tracker) is the strong alternative if Plane's API proves too heavy for arms to write to; it would sit <i>beside</i> Plane as the agents' scratch memory, not replace the board Shaan looks at. Decide after the first week of ephemeral owners, not before.</div>
+
+<h2>Order of work — smallest change that removes the biggest failure</h2>
+<table>
+<tr><th>#</th><th>Change</th><th>Removes</th><th>Size</th></tr>
+<tr><td>1</td><td>Agent Zero pane on the VPS; retarget <code>az-notify</code>; laptop resume retired</td><td>silent death, fleet inbox in Shaan's pane</td><td>an hour</td></tr>
+<tr><td>2</td><td><code>az-send</code> with read-back; briefs forbid raw pane sends</td><td>unsubmitted dispatches</td><td>an hour</td></tr>
+<tr><td>3</td><td><code>siso-browse</code> on the VPS with persisted login; delete <code>/tmp/pw/*</code></td><td>53 scripts, leaked browsers, "renders" without proof</td><td>half a day</td></tr>
+<tr><td>4</td><td>Ephemeral owner contract: brief → done-check → handoff → exit; AZ closes panes</td><td>the $591/day resident context</td><td>a day, then it is the habit</td></tr>
+<tr><td>5</td><td><code>worker</code> CLI for owners: Qwen or Luna, brief + files + check, result as path</td><td>owners doing arms' work at Opus prices</td><td>a day; pool already serves</td></tr>
+<tr><td>6</td><td>Agent Zero tab in Agents (four panels above)</td><td>Shaan flying blind; asking agents for status</td><td>one owner, two days</td></tr>
+<tr><td>7</td><td><code>/assets</code> miss → 404; <code>/preview/*/assets</code> served</td><td>blank tabs after deploys; blank named previews</td><td>Caddy, an hour, root</td></tr>
+</table>
+
+<h2>What stays exactly as it is</h2>
+<p>Opus for brain and owners — it is the cost-efficient tier for judgement. herdr as the fleet substrate. Plane as the board. <code>siso-deploy.sh</code> as the only publisher. The console for anything Shaan must see. The owner model itself: today it shipped Health with storage, Budgets, Devices, the token explanation, and a hardened deploy path — the structure works; it is the plumbing between tiers that leaked.</p>
+<p class="sub">Written 2026-09-11 by the laptop session relaying for Shaan. Evidence: herdr statuslines, <code>/tmp/pw</code>, <code>az-notify</code> source, Agent Zero's transcript, today's releases.</p>
+</body></html>

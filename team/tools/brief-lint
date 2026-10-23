@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""brief-lint — refuse a brief that cannot produce the right work.
+
+  brief-lint --team <slug> [--intent-dir DIR] TASK-*.md [...]        exit 0 = spawnable, 1 = not
+
+Three failures cost the Labs team a day on 2026-09-11/12, each caught by the human, not the
+fleet: a Life port built from the wrong tree of the right repo ("faithful" to what nobody
+had looked at), a Tokens page rebuilt in our components when he said "rob their UI exactly",
+and an Inbox latency fix when he had asked for Buzz three times. Every one traces to a brief
+whose §1 paraphrased him, whose "reference" was a folder someone guessed, and whose definition
+of done compared the result to itself.
+
+A brief passes only if:
+  1. QUOTES   — §1 contains at least one quoted line (> "...") that appears verbatim in the
+                team's intent/ files. Paraphrase is not intent.
+  2. VISUAL   — visual/UI/reproduction briefs, and legacy briefs that already carry Reference:,
+                name a real comparison artefact and judge the result beside it.
+  3. OUTCOME  — non-visual briefs name an observable acceptance result (artifact, behavior,
+                test/check, receipt, status, metric, or command); a generic "done" is not enough.
+  4. ASKS     — if a `Asked: N times` line is present it must match intent-asks for the
+                keyword given as `Asked-keyword:`; if the keyword has been asked 2+ times the
+                brief must carry the count (owners may not leave a repeated ask "not started").
+"""
+import glob, argparse, glob, os, re, sys
+HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+
+def resolve_intent_dir(team, briefs=()):
+    """Where this team's verbatim intent actually lives.
+
+    A team may keep its intent in the template checkout (teams/<team>/intent) or in its own
+    companion repo (<companion>/intent) beside its briefs. Both paths existed for
+    siso-internal-labs and the near-empty one silently won, so every brief failed QUOTES
+    against a corpus that did not contain his words. Prefer whichever holds more intent.
+    """
+    cands = [os.path.join(ROOT, "teams", team, "intent")]
+    for b in briefs:
+        # a brief at <companion>/briefs/TASK-*.md implies <companion>/intent
+        cands.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(b))), "intent"))
+    best, best_n = cands[0], -1
+    for c in cands:
+        n = len(glob.glob(os.path.join(c, "*.md"))) if os.path.isdir(c) else -1
+        if n > best_n:
+            best, best_n = c, n
+    return best
+
+
+def intent_bodies(d):
+    out = []
+    for p in glob.glob(os.path.join(d, "*.md")):
+        s = open(p, errors="ignore").read()
+        m = re.match(r"---\n(.*?)\n---\n\n?(.*)\Z", s, re.S)
+        out.append(norm(m.group(2) if m else s))
+    return out
+
+def norm(t): return re.sub(r"\s+", " ", t.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')).strip().lower()
+
+VISUAL_KINDS = {"visual", "ui", "frontend", "reproduction"}
+NONVISUAL_KINDS = {"nonvisual", "build", "backend", "research", "ops", "data", "docs", "code", "security"}
+
+def task_kind(s):
+    m = re.search(r"^(?:Task-kind|Kind):\s*(.+)$", s, re.M | re.I)
+    if not m: return None
+    value = m.group(1).strip().lower()
+    if value in VISUAL_KINDS: return "visual"
+    if value in NONVISUAL_KINDS: return "nonvisual"
+    return "unknown"
+
+def done_section(s):
+    return re.search(r"^##[^\n]*(?:done|acceptance|verify|outcome)[^\n]*\n(.*?)(?=^## |\Z)", s, re.M | re.S | re.I)
+
+def lint(path, bodies, intent_dir):
+    s = open(path, errors="ignore").read(); fails = []
+    quotes = [q.strip() for q in re.findall(r"^>\s*\"?(.+?)\"?\s*$", s, re.M)]
+    def found(q):
+        # a quote may elide with … or ...; every fragment of 25+ chars must appear verbatim
+        frags = [f.strip(" .\"'") for f in re.split(r"…|\.\.\.", q)]
+        frags = [norm(f) for f in frags if len(f.strip()) >= 25] or [norm(q)]
+        return all(any(f in b for b in bodies) for f in frags)
+    verbatim = [q for q in quotes if found(q)]
+    if not quotes: fails.append("QUOTES: no '> ...' quote in the brief")
+    elif not verbatim: fails.append("QUOTES: none of the %d quotes appears verbatim in intent/ (paraphrase?)" % len(quotes))
+    ref = re.search(r"^\**Reference\**:\s*(.+)$", s, re.M | re.I)
+    kind = task_kind(s)
+    if kind == "unknown": fails.append("KIND: unsupported task kind; use visual, ui, frontend, reproduction, nonvisual, build, backend, research, ops, data, docs, code, or security")
+    if kind is None and ref is None: fails.append("KIND: explicit Task-kind is required when no legacy Reference is present")
+    visual = kind == "visual" or (kind is None and ref is not None)  # Reference keeps old briefs visual-compatible.
+    if visual and not ref: fails.append("REFERENCE: visual brief needs `Reference: <screenshot path or URL>`")
+    elif ref:
+        # The line is prose: take the first token, unwrap backticks, and ignore a trailing
+        # parenthetical. A path wrapped in backticks used to fail as "does not exist".
+        r = ref.group(1).strip().split()[0].strip("`\"'(),")
+        if not r.startswith("http") and not os.path.exists(r): fails.append("REFERENCE: path does not exist: %s" % r)
+    done = done_section(s)
+    if not done: fails.append("OUTCOME: no definition-of-done or acceptance section")
+    elif visual and not re.search(r"beside|reference", done.group(1), re.I): fails.append("VISUAL: definition of done must compare beside the reference")
+    elif not visual:
+        acceptance = re.search(r"^(?:Acceptance|Observable):\s*(.+)$", done.group(1), re.M | re.I)
+        value = acceptance.group(1).strip() if acceptance else ""
+        if not acceptance or len(value) < 12 or re.fullmatch(r"(?:tbd|todo|done|n/?a|same|pass|works)[.! ]*", value, re.I): fails.append("OUTCOME: non-visual work needs a concrete `Acceptance:` or `Observable:` result")
+    kw = re.search(r"^Asked-keyword:\s*(.+)$", s, re.M)
+    if kw:
+        import importlib.util, importlib.machinery
+        loader = importlib.machinery.SourceFileLoader("ia", os.path.join(HERE, "intent-asks"))  # no .py suffix
+        spec = importlib.util.spec_from_loader("ia", loader); ia = importlib.util.module_from_spec(spec); loader.exec_module(ia)
+        n = len(ia.asks(intent_dir, kw.group(1).strip()))
+        m = re.search(r"^Asked:\s*(\d+)", s, re.M)
+        if n >= 2 and not m: fails.append("ASKS: '%s' has been asked %d times; brief must carry `Asked: %d times`" % (kw.group(1).strip(), n, n))
+        elif m and int(m.group(1)) < n: print("      ~ ASKS: intent now says %d (brief says %s) — he has asked again since this brief was written" % (n, m.group(1)))
+    return fails
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--team", required=True); ap.add_argument("--intent-dir"); ap.add_argument("briefs", nargs="+"); a = ap.parse_args()
+    d = a.intent_dir or resolve_intent_dir(a.team, a.briefs); bodies = intent_bodies(d)
+    if not bodies: print("brief-lint: no intent files in %s" % d); sys.exit(1)
+    bad = 0
+    for b in a.briefs:
+        f = lint(b, bodies, d)
+        print(("PASS  " if not f else "FAIL  ") + os.path.basename(b)); [print("      - " + x) for x in f]; bad += bool(f)
+    sys.exit(1 if bad else 0)
+
+if __name__ == "__main__": main()

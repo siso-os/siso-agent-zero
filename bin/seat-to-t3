@@ -51,6 +51,8 @@ def t3_projects():
 rec = record()
 if not rec: sys.exit(say("no live host on the laptop (mini seats need SISO Code on the mini)") or 1)
 name, pane, cwd, session = rec["name"], rec["pane"], rec["cwd"].rstrip("/"), rec["session"]
+if name.casefold() in ("a0", "agent zero", "agent-zero", "orchestrator", "laptop orchestrator"):
+    cwd = f"{HOME}/SISO_Workspace/_data/worktrees/siso/live/agents/zero"
 if not now:
     for _ in range(360):  # 30 minutes
         try:

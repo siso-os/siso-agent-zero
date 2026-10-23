@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""a0 board [--json] [--since 2h|ISO8601]; a0 backfill PIDS; a0 fleet-refresh.
+
+Board inputs are read-only. A text view without --since saves only its own
+last-look cursor and a dated fleet cache. Fleet has a 1.15s deadline and falls back to a dated snapshot.
+"""
+import argparse
+import fcntl
+from concurrent.futures import ThreadPoolExecutor
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sqlite3
+from contextlib import closing
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'harness/bin'))
+from a0_events import alive, data_home, events_path, load, run_event
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from a0_receipts import dispatches, dispatch_path
+
+LIVE = ('queued', 'preparing', 'starting', 'running', 'waiting')
+CLOSED = ('happy', 'dropped', 'live', 'feedback')
+STATE = Path(os.environ.get('A0_BOARD_STATE', str(Path.home() / '.local/state/a0')))
+
+
+def stamp(value):
+    if isinstance(value, (float, int)):
+        return float(value)
+    try:
+        return dt.datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError):
+        return 0
+
+
+def lines(path):
+    try:
+        with Path(path).open() as src:
+            for line in src:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        yield row
+                except ValueError:
+                    continue
+    except OSError:
+        return
+
+
+def since_time(value, now):
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)([smhd])', value)
+    if match:
+        return now - float(match[1]) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[match[2]]
+    parsed = stamp(value)
+    if not parsed:
+        raise ValueError('--since needs a duration (2h) or ISO timestamp')
+    return parsed
+
+
+def fleet(timeout=1.15):
+    fixture = os.environ.get('A0_FLEET_JSON')
+    if fixture:
+        return {'at': time.time(), 'rows': load(fixture, []), 'source': 'fixture'}
+    try:
+        proc = subprocess.run(['fleet-check', '--json'], capture_output=True, text=True, timeout=timeout)
+        if proc.returncode:
+            raise ValueError('fleet-check failed')
+        rows = json.loads(proc.stdout)
+        if not isinstance(rows, list):
+            raise ValueError('invalid fleet output')
+        return {'at': time.time(), 'rows': rows, 'source': 'live'}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        if timeout < 2:
+            # One-shot refresh continues off the board's latency path. Its lock
+            # prevents repeated views from starting concurrent fleet scans.
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'fleet-refresh'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        cached = load(STATE / 'board-fleet.json')
+        return {**cached, 'rows': cached.get('rows', []), 'source': 'cached' if cached else 'unavailable',
+                'warning': 'fleet-check exceeded deadline or failed; snapshot age shown'}
+
+
+def inventory(events, runs, seats):
+    """Unfiltered reconciliation. A current seat status is never proof of an older ask."""
+    sent = dispatches()
+    receipts = [e for e in events if e.get('status') in ('done', 'blocked', 'needs-shaan')]
+    for row in runs:
+        if row.get('status') in ('done', 'blocked', 'needs-shaan') and row.get('id') and not any(e.get('id') == row['id'] for e in receipts):
+            receipts.append(row)
+    by_dispatch = {r.get('dispatch'): r for r in receipts if r.get('dispatch')}
+    owners = {}
+    for dispatch in sent:
+        receipt = by_dispatch.get(dispatch['id'])
+        dispatch.update(receipt=receipt.get('id') if receipt else None,
+                        outcome=receipt.get('status') if receipt else 'missing-return')
+        if dispatch.get('name') and dispatch.get('thread'):
+            owner = owners.setdefault(dispatch['name'], {'who': dispatch['name'], 'dispatches': [], 'asks': []})
+            owner['dispatches'].append(dispatch['id'])
+    asks = []
+    task_dir = data_home() / 'tasks'
+    unreadable = []
+    for path in sorted(task_dir.glob('*.json')):
+        if path.name == 'INDEX.json':
+            continue
+        task = load(path)
+        if not task or not task.get('id'):
+            unreadable.append(str(path))
+            task = {'id': path.stem, 'stage': 'unreadable'}
+        ask = {k: task.get(k) for k in ('id', 'title', 'stage', 'owner', 'agent', 'priority')}
+        ask['outstanding'] = task.get('stage') not in CLOSED
+        ask['dispatches'] = [d['id'] for d in sent if ask['id'] in d['tasks']]
+        ask['receipts'] = [r['id'] for r in receipts if r.get('task') == ask['id'] or ask['id'] in (r.get('tasks') or [])]
+        ask['missing_receipt'] = not ask['receipts']
+        asks.append(ask)
+        if ask['owner']:
+            owner = owners.setdefault(ask['owner'], {'who': ask['owner'], 'dispatches': [], 'asks': []})
+            owner['asks'].append(ask['id'])
+    for seat in seats:
+        if seat.get('seat') in owners:
+            owners[seat['seat']]['current'] = {k: seat.get(k) for k in ('status', 'thread', 'run', 'machine')}
+    children = [{**d, 'source': 'dispatch'} for d in sent if d.get('kind') in ('Agent', 'Task', 'delegate_task')]
+    children.extend(runs)
+    known_runs = {r.get('run') for r in runs}
+    children.extend({e['run']: e for e in events if e.get('run') and e['run'] not in known_runs}.values())
+    child_db = Path(os.environ.get('A0_T3_DB', str(Path.home() / '.local/state/siso-code/userdata/statev2.sqlite')))
+    child_coverage = {'path': str(child_db), 'present': child_db.is_file(), 'error': None}
+    threads = {d['thread'] for d in sent if d.get('thread')}
+    if threads and child_db.is_file():
+        try:
+            with closing(sqlite3.connect(f'file:{child_db}?mode=ro', uri=True, timeout=1)) as db:
+                # Only run/lineage metadata for dispatched work owners; never read messages.
+                for run, thread, status, parent, root in db.execute(
+                    "select r.run_id, r.thread_id, r.status, "
+                    "json_extract(t.payload_json, '$.lineage.parentThreadId'), "
+                    "json_extract(t.payload_json, '$.lineage.rootThreadId') "
+                    "from orchestration_v2_projection_runs r join orchestration_v2_projection_threads t "
+                    "on t.thread_id=r.thread_id where json_extract(t.payload_json, '$.lineage') is not null"):
+                    if parent in threads or root in threads:
+                        children.append({'source': 'siso-code', 'run': run, 'thread': thread,
+                                         'status': status, 'parent': parent, 'root': root})
+        except sqlite3.Error as exc:
+            child_coverage['error'] = type(exc).__name__
+    sources = {'dispatches': dispatch_path(), 'tasks': task_dir,
+               'events': events_path(), 'task_events': task_dir / 'events.jsonl',
+               'teams': Path(os.environ.get('A0_TEAMS', str(Path.home() / 'SISO_Workspace/.agents/teams'))),
+               'runs': Path(os.environ.get('CODEX_RUN_STATE', str(Path.home() / '.local/state/codex-run'))) / 'runs'}
+    return {'owners': list(owners.values()), 'asks': asks, 'dispatches': sent,
+            'child_runs': children, 'receipts': receipts,
+            'coverage': {'sources': {k: {'path': str(v), 'present': v.exists()} for k, v in sources.items()},
+                         'unreadable_tasks': unreadable, 'child_runs': child_coverage,
+                         'missing_returns': [d['id'] for d in sent if not d['receipt']]}}
+
+
+def snapshot(since):
+    now = time.time()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fleet)
+        events = list(lines(events_path()))
+        # Sidecar contains the same ids; merge for crash recovery.
+        by_id = {e.get('id', str(i)): e for i, e in enumerate(events)}
+        for event in lines(data_home() / 'tasks/events.jsonl'):
+            by_id[event.get('id')] = event
+        events = sorted(by_id.values(), key=lambda e: stamp(e.get('at')))
+        recent = [e for e in events if stamp(e.get('at')) >= since]
+        running, blocked, finished = [], [], []
+        latest = {e.get('run') or e.get('board') or e.get('id'): e for e in events}
+        run_dir = Path(os.environ.get('CODEX_RUN_STATE', str(Path.home() / '.local/state/codex-run'))) / 'runs'
+        run_seen = set()
+        runs = []
+        for path in run_dir.glob('*.meta.json'):
+            meta = load(path)
+            prefix = str(path)[:-10]
+            run_seen.add(prefix)
+            usage = load(prefix + '.usage.json')
+            terminal = latest.get(prefix, {})
+            remote = bool(meta.get('remote_run'))
+            observer = load(prefix + '.mirror.json')
+            observer_alive = alive(observer.get('pid')) if remote else False
+            is_alive = alive(meta.get('pid')) if not remote else None
+            if usage or terminal.get('kind') in ('done', 'blocked', 'needs-shaan'):
+                row = terminal if terminal.get('kind') in ('done', 'blocked', 'needs-shaan') else run_event(prefix)
+                row = {**row, 'pid_alive': is_alive}
+                if row.get('status') in ('blocked', 'needs-shaan'):
+                    blocked.append(row)
+                elif stamp(row.get('at')) >= since:
+                    finished.append(row)
+            else:
+                row = {'who': meta.get('worker') or meta.get('name') or path.stem,
+                       'task': meta.get('task'), 'run': prefix, 'pid': meta.get('pid'),
+                       'pid_alive': is_alive, 'observer_pid_alive': observer_alive, 'machine': meta.get('machine', 'laptop'),
+                       'age': max(0, now - stamp(meta.get('started'))),
+                       'status': 'running' if is_alive or observer_alive else 'remote-unobserved' if remote else 'blocked',
+                       'reason': '' if is_alive else 'remote pid unobserved; mirror alive' if observer_alive else 'remote pid unobserved' if remote else 'launcher pid dead; no completion receipt'}
+                (running if is_alive or observer_alive else blocked).append(row)
+            runs.append(row)
+        for key, event in latest.items():
+            if key in run_seen or event.get('source') == 'haiku-team':
+                continue
+            if event.get('status') in ('blocked', 'needs-shaan'):
+                blocked.append(event)
+            elif event.get('kind') == 'done' and stamp(event.get('at')) >= since:
+                finished.append(event)
+        teams = []
+        team_dir = Path(os.environ.get('A0_TEAMS', str(Path.home() / 'SISO_Workspace/.agents/teams')))
+        team_paths = set(team_dir.glob('*.jsonl'))
+        team_paths.update(Path(e['board']).expanduser() for e in events if e.get('source') == 'haiku-team' and e.get('board'))
+        for path in sorted(team_paths):
+            if path.name == 'IMPROVE.jsonl':
+                continue
+            rows = list(lines(path))
+            event = latest.get(str(path)) or latest.get('~/SISO_Workspace/.agents/teams/' + path.name)
+            final = next((r for r in reversed(rows) if 'table' in r and 'state' in r), None)
+            updated = path.stat().st_mtime if path.exists() else stamp((event or {}).get('at'))
+            team = {'who': path.stem, 'board': str(path), 'source': 'haiku-team',
+                    'status': event.get('status') if event else 'unobserved',
+                    'at': event.get('at') if event else updated,
+                    'task': (event or {}).get('task'), 'age': now - updated,
+                    'final_recorded': bool(final)}
+            team['receipt'] = event.get('id') if event and event.get('status') in ('done', 'blocked', 'needs-shaan') else None
+            team['missing_receipt'] = not team['receipt']
+            teams.append(team)
+            if team['status'] == 'running':
+                running.append(team)
+            elif team['status'] in ('blocked', 'needs-shaan', 'unobserved'):
+                blocked.append(team)
+            elif stamp(team['at']) >= since:
+                finished.append(team)
+        seats = future.result()
+    seat_map = load(Path.home() / '.local/state/agent-base/t3-seats.json')
+    idle = []
+    for seat in seats['rows']:
+        seat = {**seat, 'machine': seat.get('machine') or seat_map.get(seat.get('seat'), {}).get('runsOn') or 'laptop'}
+        if seat.get('status') in LIVE:
+            running.append({'who': seat.get('seat'), 'source': 'seat', **seat})
+        elif seat.get('status', '').startswith('unreachable'):
+            blocked.append({'who': seat.get('seat'), 'source': 'seat', **seat})
+        elif seat.get('status') == 'completed' or seat.get('status') == 'no runs':
+            idle.append(seat)
+        else:
+            blocked.append({'who': seat.get('seat'), 'source': 'seat', **seat})
+    workers = {r.get('task') for r in running if r.get('task')}
+    worker_names = {r.get('who') for r in running}
+    tasks = []
+    for path in (data_home() / 'tasks').glob('*.json'):
+        if path.name == 'INDEX.json':
+            continue
+        task = load(path)
+        if not task or task.get('stage') in CLOSED:
+            continue
+        worker = task.get('agent')
+        task = {k: task.get(k) for k in ('id', 'title', 'stage', 'priority', 'owner', 'agent')}
+        task['no_owner'] = not task.get('owner')
+        task['no_worker'] = task['id'] not in workers and worker not in worker_names and task.get('owner') not in worker_names
+        if task['no_owner'] or task['no_worker']:
+            tasks.append(task)
+    detail = inventory(events, runs, seats['rows'])
+    return {**detail, 'at': now, 'since': since, 'running': running,
+            'finished': sorted(finished, key=lambda r: stamp(r.get('at')), reverse=True),
+            'blocked': blocked, 'idle': idle, 'unattended_tasks': sorted(tasks, key=lambda t: (t.get('priority') or 'P3', t['id'])),
+            'teams': teams, 'fleet': {k: v for k, v in seats.items() if k != 'rows'},
+            'counts': {'open_tasks_without_owner_or_worker': len(tasks), 'events': len(events), 'events_since': len(recent),
+                       'asks': len(detail['asks']), 'owners': len(detail['owners']),
+                       'missing_returns': len(detail['coverage']['missing_returns'])}}
+
+
+def render(board):
+    def row(r):
+        age = r.get('age', max(0, board['at'] - stamp(r.get('at'))))
+        age = f'{int(age // 60)}m' if isinstance(age, (float, int)) else age
+        return f"{r.get('who') or r.get('seat') or r.get('id')} {r.get('task') or '-'} {age} {r.get('status') or r.get('stage')} {r.get('machine', '')}".strip()
+    out = [f"A0 BOARD  {dt.datetime.fromtimestamp(board['at']).astimezone().isoformat(timespec='seconds')}  recorded runs",
+           f"Fleet: {board['fleet'].get('source')} age={max(0, int(board['at'] - board['fleet'].get('at', board['at'])))}s; full detail: --json"]
+    for title, key in [('RUNNING NOW', 'running'), ('FINISHED SINCE LAST LOOK', 'finished'), ('BLOCKED / NEEDS-SHAAN', 'blocked'), ('IDLE SEATS', 'idle'), ('OPEN TASKS WITHOUT OWNER / WORKER', 'unattended_tasks')]:
+        rows = board[key]
+        out.append(f'{title} ({len(rows)})')
+        for item in rows[:3]:
+            out.append('  ' + (row(item) if key != 'unattended_tasks' else f"{item['id']} {item.get('owner') or 'NO OWNER'} {item.get('stage')} {item.get('title', '')[:70]}"))
+        if not rows:
+            out.append('  -')
+        elif len(rows) > 3:
+            out.append(f'  +{len(rows) - 3} more (--json)')
+    out.append(f"RECONCILIATION: {len(board['teams'])} teams; {len(board['owners'])} owners; "
+               f"{len(board['child_runs'])} child runs; {len(board['asks'])} asks; {len(board['receipts'])} receipts")
+    out.append(f"MISSING RETURNS: {len(board['coverage']['missing_returns'])}; all records and correlations: a0 board --json")
+    return '\n'.join(out)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('board', 'backfill', 'fleet-refresh', 'team-event'))
+    parser.add_argument('pids', nargs='?')
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--since')
+    args = parser.parse_args()
+    if args.command == 'team-event':
+        from a0_events import emit, append
+        event = json.loads(args.pids)
+        event['board'] = str(Path(event['board']).expanduser())
+        event.setdefault('source', 'haiku-team')
+        event.setdefault('at', dt.datetime.now(dt.timezone.utc).isoformat())  # the Workflow VM cannot read the clock
+        event.setdefault('id', 'haiku-team:' + event['board'] + ':' + event['kind'])
+        emit(event)
+        append(event['board'], event)
+        return
+    if args.command == 'backfill':
+        if not args.pids:
+            parser.error('backfill requires pids.txt')
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve().parents[2] / 'harness/bin/a0_events.py'), 'backfill', args.pids])
+    if args.command == 'fleet-refresh':
+        STATE.mkdir(parents=True, exist_ok=True)
+        lock = (STATE / 'board-fleet.lock').open('a')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        result = fleet(timeout=40)
+        if result['source'] != 'live':
+            raise SystemExit('fleet snapshot unavailable')
+        STATE.mkdir(parents=True, exist_ok=True)
+        temp = STATE / 'board-fleet.json.tmp'
+        temp.write_text(json.dumps(result) + '\n')
+        temp.replace(STATE / 'board-fleet.json')
+        print(f"fleet snapshot: {len(result['rows'])} seats")
+        return
+    now = time.time()
+    try:
+        since = since_time(args.since, now) if args.since else load(STATE / 'board-seen.json').get('at', now - 86400)
+    except ValueError as exc:
+        parser.error(str(exc))
+    result = snapshot(since)
+    print(json.dumps(result, ensure_ascii=False) if args.json else render(result))
+    if not args.json and not args.since:
+        STATE.mkdir(parents=True, exist_ok=True)
+        (STATE / 'board-seen.json').write_text(json.dumps({'at': now}) + '\n')
+
+
+if __name__ == '__main__':
+    main()

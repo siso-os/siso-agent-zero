@@ -1,0 +1,8 @@
+# Append to ~/.codex/config.toml on any box that spawns Qwen arms (bin/spawn-worker --harness codex --model qwen).
+# No key lives here: export SISO_POOL_KEY in the environment (on the labs VPS the gateway is the
+# Bifrost tunnel held open by siso-pool-tunnel.service; see the siso-compute-pool skill).
+[model_providers.siso-pool]
+name = "SISO Qwen pool"
+base_url = "http://127.0.0.1:18080/v1"
+env_key = "SISO_POOL_KEY"
+wire_api = "responses"   # Codex 0.154 dropped "chat"; the pool gateway (Bifrost) answers /v1/responses

@@ -1,21 +1,67 @@
-#!/bin/sh
-# a0-review: Agent Zero's daily self-review, run by one headless Haiku 5.5 (launchd com.siso.a0-review, 07:30).
-# Shaan, 17 Oct: "Haikus are basically free ... upgrade, upgrade, upgrade on the side". It reads the last day of
-# dispatches, mistakes and seat state, files up to three upgrades with a0-upgrade and ships the clear-cut ones.
-# Opus spends nothing on this. Output: ~/.local/state/a0/a0-review.log; its upgrades show in `a0-upgrade list --all`.
-set -u
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-siso}"
-cd "$HOME/SISO_Workspace/_data" || exit 1
-echo "== $(date '+%F %T') a0-review"
-exec timeout 1500 claude -p --model claude-haiku-5-5 --dangerously-skip-permissions "You are Agent Zero's daily self-review.
-Agent Zero is the one orchestrator agent Shaan talks to; its skills are in ~/SISO_Workspace/SISO_Agents/agent-zero/siso-firstmate/.agents/skills/ and its tools in ~/SISO_Workspace/_data/worktrees/siso/live/agents/zero/bin/.
-Read, in this order and only these:
-1. seat (the org chart with live titles) and seat log 60 (the last dispatches).
-2. tail -40 ~/.claude/lessons/LEDGER.md (mistakes).
-3. a0-upgrade list --all (upgrades already filed; never file a duplicate).
-4. The skill an issue points at, one window at a time.
-Find at most THREE concrete, repeated problems: a seat not ok, sends to the same seat over and over within minutes, Agent rows on model inherit or opus, a mistake in the LEDGER that has happened twice, a skill line that contradicts another.
-For each one, file it with: a0-upgrade add \"<the change, as an edit>\" --why \"<count or path>\" --repo firstmate|agent-zero, adding --ask when it changes what Shaan sees, model or spend routing, a safety rule, or a seat he works with.
-Then ship each auto one you filed in this run (never an id you did not file) by following ~/.claude/agents/upgrader.md for its id. Leave ask ones filed; Agent Zero tells Shaan.
-If nothing is worth fixing, file nothing. Print one line per upgrade: id, status, PR. Nothing else."
+#!/usr/bin/env python3
+"""Daily 07:30 and half-hourly Haiku self-upgrade entrypoint; one filed upgrade per run."""
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+
+from a0_data_home import resolve_data_home
+
+SOURCE = Path(__file__).resolve().parents[1]
+LIVE = Path.home() / "SISO_Workspace/_data/worktrees/siso/live/agents/zero"
+
+PROMPT = """You are Agent Zero's Haiku self-upgrade runner. Ship at most ONE filed upgrade this run.
+First curate the existing self files (ADR 0010), even when there is no code upgrade:
+read AGENTS.md's self-file map and PRINCIPLES.md's correction -> fact -> rule -> check ladder.
+AGENTS.md must remain <=150 lines, its Now must be today's dated checkpoint, memory index <25 lines,
+and the selected HANDOFF top entry <=24 h old. Run python3 {source}/bin/a0_self.py for advisory warnings.
+Read mutable HANDOFF and memory only under {data}; never write into live. Use final reports,
+existing lessons and dated Shaan words only; never read reasoning or raw transcripts. Record decisions,
+owner/builder spawns and lessons at the checkpoint; preserve all previous text and archive superseded text.
+If no fresh outcome is observable, say that and retain open work; never invent done or refresh old evidence.
+Promote a sourced lesson to a memory line or file an upgrade. Keep source rules/tools changes in the
+ONE upgrade worktree and ship through the existing pipeline. Prioritize a stale self-file correction.
+Every run first checks the BRAVE rules are live: ~/.agents/AGENTS.md has "Never park" and "Research before you build",
+park-guard.mjs and research-nudge.mjs are registered in ~/.config/claude-siso-3/settings.json and ~/.claude/settings.json
+and exist under the live agents/harness/hooks, and skill research-first is in ~/.claude/skills and ~/.agents/skills.
+If AGENTS.md drifted, regenerate it with agents/harness/brain/compose-brain.mjs. For a missing hook or skill, report it on the return line; never hand-edit settings.
+Run a0-upgrade ingest --limit 3, then a0-upgrade list --all first. Read a candidate source and lesson, check current code and existing fixes before choosing its concrete edit; drop already-fixed candidates with evidence. Escalate safety, routing, spend and user-experience changes through the existing ask path. Select ONE queued auto upgrade, or, if none is queued, inspect
+
+seat log 30 and the last 30 lines of the lesson ledger for ONE concrete repeated problem.
+File it using a0-upgrade add with evidence and --repo agent-zero; never duplicate an existing upgrade.
+If nothing merits a change, return NO_UPGRADE with the evidence. Never invent work.
+For exactly that one id, follow your upgrader instructions: a0-upgrade start, one focused check,
+a0-upgrade ship --check. Changes to safety, routing, spend or Shaan's experience require --ask;
+leave those for the existing ask process. Never process another upgrade this run.
+Never use another model, start Agent/Workflow, restart SISO Code or print secrets.
+Return at most four lines: upgrade id, status, check, PR URL (or NO_UPGRADE and evidence).
+"""
+
+
+def main():
+    state = Path.home() / '.local/state/a0'
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / 'haiku-selfupgrade.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('SKIPPED: Haiku self-upgrade already running')
+            return 0
+        env = dict(os.environ, A0_SELF_CHECKPOINT='1')
+        env['PATH'] = str(Path.home() / '.local/bin') + ':/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+        # Deterministic owner housekeeping runs even when Haiku finds no upgrade.
+        # Its failure is visible but must not suppress the existing upgrade loop.
+        if (Path.home() / '.local/state/agent-base/t3-seats.json').exists():
+            try:
+                subprocess.run([str(SOURCE / 'bin/owner-idle'), '--apply'], env=env, timeout=240, check=True)
+            except (subprocess.SubprocessError, OSError) as error:
+                print('OWNER_IDLE_BLOCKED: ' + type(error).__name__, flush=True)
+        try:
+            return subprocess.run(['haiku', PROMPT.format(source=SOURCE, data=resolve_data_home()), '--agent', 'upgrader', '--cwd', str(LIVE)], env=env, timeout=1550).returncode
+        except subprocess.TimeoutExpired:
+            print('BLOCKED: Haiku self-upgrade exceeded 1550 seconds')
+            return 124
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

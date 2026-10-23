@@ -28,16 +28,20 @@ Records live in .agents/a0/ of this repo (private, tracked); the agents' report 
 import argparse, datetime as dt, fcntl, json, os, re, shutil, socket, subprocess, sys, uuid
 
 HOME_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # this repo: data in .agents/a0/, tasks in tasks/
-BOOT_DIR = os.path.expanduser("~/SISO_Workspace/_data/worktrees/siso/main/agents/zero")  # where Agent Zero runs (4 Oct)
-DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME_DIR, "../../.siso")) else HOME_DIR
+BOOT_DIR = os.path.expanduser("~/SISO_Workspace/_data/worktrees/siso/live/agents/zero")  # where Agent Zero runs (4 Oct)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from a0_data_home import resolve_data_home, resolve_agent_home
+
+DATA_HOME = str(resolve_data_home()) if os.path.isdir(os.path.join(HOME_DIR, "../../.siso")) else HOME_DIR
 A0 = os.path.join(DATA_HOME, ".agents", "a0")
-SESSIONS = os.path.join(A0, "sessions.jsonl")
-LOG = os.path.join(A0, "log.jsonl")
+PRIVATE_HOME = os.environ.get("A0_PRIVATE_HOME", os.path.expanduser("~/.local/state/a0/private"))
+SESSIONS = os.path.join(PRIVATE_HOME, "sessions.jsonl")
+LOG = os.path.join(PRIVATE_HOME, "log.jsonl")
 TASKS = os.path.join(A0, "tasks.json")
 GOALS = os.path.join(A0, "GOALS.md")
 HANDOFF = os.path.join(A0, "HANDOFF.md")
-INBOX = os.path.join(A0, "inbox.log")
-LEDGER = os.path.expanduser("~/SISO_Workspace/SISO_Agents/siso-harness-lab/.agents/efficiency/LEDGER.jsonl")
+INBOX = os.path.join(PRIVATE_HOME, "inbox.log")
+LEDGER = os.path.expanduser("~/.local/state/siso-harness-lab/efficiency/LEDGER.jsonl")
 STATUSES = ["running", "in_progress", "needs-shaan", "blocked", "backlog", "done"]
 LAUNCHER = os.path.expanduser("~/.local/bin/claude-siso-3")
 MODEL, EFFORT = "claude-opus-5-5", "max"
@@ -139,6 +143,7 @@ def notify_need(t):
                            capture_output=True, timeout=10)
     except Exception:
         pass
+    os.makedirs(PRIVATE_HOME, mode=0o700, exist_ok=True)
     with open(INBOX, "a") as f:
         f.write(f"{dt.datetime.now().strftime('%H:%M')} {t.get('owner') or 'A0'}: NEEDS SHAAN ({t['id']}): {t['title']}\n")
 
@@ -147,7 +152,7 @@ def boot_prompt(short):
     # 4 Oct 2026: Agent Zero boots from its fresh repo (siso-agent-zero): a short map, then the machine check. No inbox monitors,
     # no atlas skills, no claiming (one Agent Zero, state in files; PRINCIPLES.md there says why).
     return (
-        f"You are Agent Zero (chat {short}), Shaan's one agent. Read AGENTS.md here, the top entry of .agents/HANDOFF.md, "
+        f"You are Agent Zero (chat {short}), Shaan's one agent. Read AGENTS.md here, the top entry of {resolve_agent_home(DATA_HOME) / 'HANDOFF.md'}, "
         "then run `look` (the whole status in one call). Then tell Shaan, in the adhd-agent-output shape, where things stand and "
         "what you will do next."
     )
@@ -430,4 +435,5 @@ def main():
 
 
 if __name__ == "__main__":
+    os.umask(0o077)
     main()

@@ -14,6 +14,17 @@ class AwaitWaitingTests(unittest.TestCase):
         self.assertIsNotNone(ns["WAITING"].search("I'll fix them worst first and ship each one."))
 
 
+class AwaitParkedTests(unittest.TestCase):
+    def test_promise_with_no_background_job_is_parked_not_done(self):
+        ns = runpy.run_path(str(AWAIT), run_name="a0_await")
+        ns["pending_children"] = lambda thread: 0
+        ns["queued_runs"] = lambda thread: 0
+        row = lambda said: {"status": "completed", "thread": "t", "said": said}
+        self.assertTrue(ns["parked"](row("Parse failed. I'll fix it and run again.")))
+        self.assertFalse(ns["parked"](row("I'll wait for the build running in background.")))
+        self.assertFalse(ns["parked"](row("STATUS: done\nI'll fix nothing; merged.")))
+
+
 class AwaitReportTests(unittest.TestCase):
     def setUp(self):
         self.ns = runpy.run_path(str(AWAIT), run_name="a0_await")

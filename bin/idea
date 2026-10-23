@@ -16,7 +16,10 @@ Statuses: new -> approved -> integrated, or rejected. Scores 1-10 are a reader's
 import datetime as dt, json, os, subprocess, sys
 
 HOME = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DATA_HOME = os.environ.get("A0_DATA_HOME", os.path.expanduser("~/SISO_Workspace/SISO_Agents/agent-zero/siso-agent-zero")) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from a0_data_home import resolve_data_home
+
+DATA_HOME = str(resolve_data_home()) if os.path.isdir(os.path.join(HOME, "../../.siso")) else HOME
 F = os.path.join(DATA_HOME, "ideas", "ideas.jsonl")
 
 
